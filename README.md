@@ -84,6 +84,92 @@ build_replay.py (物体轨迹 → G1 23D action)
 IsaacLab-Arena (运动学回放 + 视频)
 ```
 
+## 转化流程详解：HOIFHLI → G1 回放动作
+
+整个转化发生在 `bridge/build_replay.py` 中，分为 6 个阶段。
+
+核心思路：**不做人体→机器人的运动重定向**，而是取 HOIFHLI 的物体轨迹作为"地面真值"，在物体坐标系下定义固定的手抓取位姿，沿物体轨迹展开并经过坐标变换链生成 G1 控制器能直接消费的 23D action 序列。
+
+### 阶段 1：加载 HOI 物体轨迹
+
+HOIFHLI 输出的 `human_object_results.pkl` 包含人体全身运动和物体运动，但 `build_replay.py` **只取物体轨迹**：
+- `obj_pos` [T, 3] — 物体质心世界坐标
+- `obj_rot_mat` [T, 3, 3] — 物体旋转矩阵
+
+人体关节数据完全不用。
+
+### 阶段 2：帧率重采样
+
+```
+30 FPS (HOIFHLI) → 50 FPS (Isaac Sim)
+```
+
+- 位置：线性插值（`np.interp`）
+- 旋转：转为四元数后 SLERP 球面插值
+
+### 阶段 3：确定手相对物体的抓取位姿
+
+定义手在**物体坐标系**下的 pregrasp（准备抓）和 grasp（抓住）两个位姿。来源：
+- BODex 求解（可选，当前未使用）
+- 手动指定（默认）：pregrasp `(-0.35, -0.08, 0.10)`，grasp `(-0.28, -0.05, 0.06)`
+
+这两个位姿是相对于物体的，物体怎么动，手就跟着怎么动。
+
+### 阶段 4：规划 base 轨迹 + 导航指令
+
+对每帧，在物体坐标系下施加固定偏移（base 在物体正后方 0.55m），转到世界坐标系得到 base 位置。base yaw 始终朝向物体。对相邻帧差分得到速度指令 `[vx, vy, wz]`，转到 base 局部坐标系。
+
+### 阶段 5：计算右手腕在 pelvis 坐标系下的轨迹
+
+这是核心数学。G1 的 `g1_wbc_pink` 控制器接受 pelvis 坐标系下的手腕目标。
+
+对每帧：
+1. 根据时间线在 pregrasp/grasp 之间插值（位置线性，旋转 SLERP）
+2. 物体坐标系 → 世界坐标系：`T_hand_w = T_obj_w @ T_hand_obj`
+3. 世界坐标系 → pelvis 坐标系：`p_hand_pelvis = R_base^T @ (p_hand_w - p_base_w)`
+
+完整变换链：
+
+```
+物体坐标系 ──T_obj_w──→ 世界坐标系 ──T_base_w⁻¹──→ pelvis 坐标系
+   ↑                                                    ↓
+手的 pregrasp/grasp                              G1 控制器输入
+相对位姿 (固定)                                  (每帧变化)
+```
+
+### 阶段 6：组装 23D action 向量
+
+每帧 23 个维度：
+
+```
+索引      含义                    数据来源
+─────────────────────────────────────────────────────
+[0]       左手开合状态             固定 0.0（张开）
+[1]       右手开合状态             按阶段切换
+[2:5]     左手腕位置 (pelvis)      固定值
+[5:9]     左手腕四元数 (pelvis)    固定值
+[9:12]    右手腕位置 (pelvis)      ← 阶段 5 计算
+[12:16]   右手腕四元数 (pelvis)    ← 阶段 5 计算
+[16:19]   导航指令 (vx, vy, wz)   ← 阶段 4 计算
+[19]      base 高度                固定 0.75
+[20:23]   躯干 RPY                 固定 (0, 0, 0)
+```
+
+右手开合按阶段切换：
+
+```
+帧 0 ─── nav_end ── approach_start ──── grasp_idx ── close_end ── hold_end ── N-1
+  │ 导航阶段 │ pregrasp │    approach     │  close   │   hold   │  (保持)  │
+  │ 手张开   │ 手张开   │  手张开(接近中) │  手闭合  │  手闭合  │  手张开  │
+  │ base移动 │ base停   │  base停        │  base停  │  base停  │  base停  │
+```
+
+### 输出文件
+
+- `replay_actions.hdf5` — `[N, 23]` float32 action 序列
+- `object_kinematic_traj.npz` — 物体轨迹（Isaac 回放时强制写入物体位姿，不走物理引擎）
+- `bridge_debug.json` — 参数、阶段划分、sanity check
+
 ## 环境变量
 
 脚本通过环境变量指定 Python 解释器：
