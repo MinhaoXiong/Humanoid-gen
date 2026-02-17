@@ -174,7 +174,7 @@ HOIFHLI 输出的 `human_object_results.pkl` 包含人体全身运动和物体�
 
 ### 1. HOIFHLI 人体+物体 motion 可视化
 
-HOIFHLI 采样时自动生成人体+物体交互的渲染视频（pyrender → PNG → MP4）。patch apply 后 `VISUALIZE=True` 已开启。
+HOIFHLI 上游仓库默认开启可视化（`VISUALIZE=True`），采样时自动渲染人体+物体交互视频（pyrender → PNG → MP4），无需额外配置。
 
 运行 `scripts/01_hoi_sample.sh` 后，视频输出到：
 ```
@@ -183,26 +183,34 @@ repos/hoifhli_release/visualizer_results/<vis_wdir>/
 
 ### 2. Isaac 物体 motion 单独可视化
 
-在 Isaac 回放时加 `--object-only` 参数，机器人站着不动，只回放物体轨迹：
+在 Isaac 回放时加 `--object-only` 参数，机器人站着不动，只回放物体轨迹。
+
+**Headless 模式（无显示器 / 远程服务器）**— 保存视频文件：
 
 ```bash
 ISAAC_PYTHON=/path/to/isaaclab_arena/bin/python \
   bash scripts/05_object_only_replay.sh /tmp/run1
 ```
 
-或手动调用：
+视频输出到 `output/videos/`。
+
+**GUI 模式（有显示器）**— 实时在线观看：
+
+去掉 `--headless` 参数即可打开 Isaac Sim GUI 窗口，实时观看物体运动：
+
 ```bash
-python policy_runner_kinematic_object_replay.py \
-  --headless --device cpu --enable_cameras \
+ISAAC_PYTHON=/path/to/isaaclab_arena/bin/python \
+  python repos/IsaacLab-Arena/isaaclab_arena/examples/policy_runner_kinematic_object_replay.py \
+  --device cuda:0 --enable_cameras \
   --object-only \
   --kin-traj-path /tmp/run1/object_kinematic_traj.npz \
   --kin-asset-name brown_box \
-  --save-video --save-third-person \
+  --kin-apply-timing pre_step \
   galileo_g1_locomanip_pick_and_place \
   --object brown_box --embodiment g1_wbc_pink
 ```
 
-视频输出到 `output/videos/`。
+也可以同时加 `--save-video` 在 GUI 观看的同时保存视频。
 
 ## 环境变量
 
