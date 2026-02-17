@@ -19,6 +19,22 @@
 - `docs/`：桥接流程与状态说明（中文）
 - `notes/BODex_cpp14_fix.md`：BODex 编译修复记录
 
+## 源码整理（你要求的 source code）
+
+关键源码已集中在 `source/`，按原仓库分组：
+
+- `source/hoifhli_release/sample.py`
+- `source/hoifhli_release/scripts/sample.sh`
+- `source/BODex/example_grasp/plan_batch_env.py`
+- `source/BODex/example_grasp/plan_mogen_batch.py`
+- `source/BODex/src/curobo/wrap/reacher/grasp_solver.py`
+- `source/BODex/src/curobo/wrap/reacher/types.py`
+- `source/BODex/src/curobo/util_file.py`
+- `source/BODex/src/curobo/content/configs/manip/sim_shadow/fc.yml`
+- `source/BODex/src/curobo/geom/cpp/setup.py`
+- `source/IsaacLab-Arena/tools/hoi_bodex_g1_bridge/build_replay.py`
+- `source/IsaacLab-Arena/isaaclab_arena/examples/policy_runner_kinematic_object_replay.py`
+
 ## 环境
 
 - HOI：`hoifhli_env`
