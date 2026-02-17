@@ -1,14 +1,17 @@
 # Artifacts Manifest
 
-Generated: 2026-02-17T12:12:53Z
+Generated: 2026-02-17T13:26:42Z
 
-artifacts/MANIFEST.txt	55 bytes
 artifacts/g1_bridge_run1/bridge_debug.json	1831 bytes
 artifacts/g1_bridge_run1/object_kinematic_traj.npz	16722 bytes
 artifacts/g1_bridge_run1/replay_actions.hdf5	19752 bytes
 artifacts/g1_bridge_run2/bridge_debug.json	1831 bytes
 artifacts/g1_bridge_run2/object_kinematic_traj.npz	16722 bytes
 artifacts/g1_bridge_run2/replay_actions.hdf5	19752 bytes
+artifacts/hoi_runtime_usd/.asset_hash	32 bytes
+artifacts/hoi_runtime_usd/Props/instanceable_meshes.usd	3404745 bytes
+artifacts/hoi_runtime_usd/config.yaml	1224 bytes
+artifacts/hoi_runtime_usd/smallbox.usd	3404732 bytes
 artifacts/hoifhli/human_object_results_compare_fine_01_p0_o3.pkl	328348 bytes
 artifacts/videos/g1_bridge_run2_first_person.mp4	1754845 bytes
 artifacts/videos/g1_locomanip_combined.mp4	8813643 bytes

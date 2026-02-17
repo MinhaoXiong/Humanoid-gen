@@ -374,6 +374,71 @@ CuRobo 需要 CUDA + PyTorch，编译时间较长。可以考虑先用 pinocchio
 3. **集成 CuRobo MotionGen** 到 `build_replay.py`
 4. **测试 + 调参**（碰撞球 buffer、IK seeds、trajopt steps）
 
+## TODO 落地执行清单（按优先级）
+
+### TODO-1: IK 可达性守门（1-2 天）
+
+目标：先解决“右手飞出视角”，在不接入 CuRobo 的情况下，过滤不可达 wrist 目标。
+
+实现：
+- 在 `bridge/build_replay.py` 新增 `--use-pin-ik-check`。
+- 使用 `pinocchio` 对每个 pregrasp/grasp pose 做右臂 7DOF IK（或数值逆解）。
+- IK 失败时回退：
+  - 先扩大 `pregrasp` 偏置（远离物体）
+  - 再降低 `grasp_frame_ratio`（让 approach 更早开始）
+  - 仍失败则标记该样本 `unreachable` 并跳过
+
+验收标准：
+- `bridge_debug.json` 新增字段：`ik_reachable`, `ik_fail_reason`
+- 回放不再出现明显手腕瞬移/飞出
+
+### TODO-2: G1 右臂 CuRobo 配置（2-3 天）
+
+目标：把 G1 右臂建立为可被 MotionGen 调用的机器人模型。
+
+实现：
+- 新增 `curobo_configs/g1_right_arm.yaml`
+- 新增 `curobo_configs/g1_right_arm_collision_spheres.yaml`
+- 从 `G1_omnipicker_fixed_right.yaml` 导出碰撞球并做 link 名映射
+
+验收标准：
+- 用独立脚本可完成一次 `rest -> pregrasp` 规划并返回 `success=True`
+- 保存轨迹 `npz`（joint + ee pose）
+
+### TODO-3: 集成 MotionGen 到 bridge（2-4 天）
+
+目标：替换当前线性插值 approach 段。
+
+实现：
+- `bridge/build_replay.py` 新增参数：
+  - `--use-curobo`
+  - `--curobo-config`
+  - `--g1-urdf`
+  - `--curobo-device`（`cuda:0` / `cpu`）
+- 仅在 `[0, approach_start]` 段使用 CuRobo 轨迹，后续仍保持原逻辑。
+- 规划失败自动 fallback 到原线性插值。
+
+验收标准：
+- `bridge_debug.json` 新增字段：`use_curobo`, `curobo_success`, `curobo_fallback`
+- 与原 pipeline 对比，失败率下降、轨迹更平滑
+
+### TODO-4: 端到端回放回归（1-2 天）
+
+目标：保证改动不破坏现有 Path A 回放流程。
+
+实现：
+- 固定输入：
+  - `human_object_results.pkl`
+  - `grasp.npy`（或手工 fallback grasp）
+- 分别跑：
+  - `--use-curobo` 开
+  - `--use-curobo` 关
+- 对比：终点误差、回放稳定性、视频可视效果
+
+验收标准：
+- 两条链路都能生成 `replay_actions.hdf5` + `object_kinematic_traj.npz`
+- `--use-curobo` 版本在 approach 段不再出现明显穿模/突变
+
 ## 附录：CuRobo MotionGenResult 输出结构
 
 ```python

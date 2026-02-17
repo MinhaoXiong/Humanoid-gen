@@ -248,6 +248,7 @@ cd /home/ubuntu/DATA2/workspace/xmh/IsaacLab-Arena
 - `artifacts/g1_bridge_run1/`
 - `artifacts/g1_bridge_run2/`
 - `artifacts/hoifhli/`
+- `artifacts/hoi_runtime_usd/`
 - `artifacts/videos/`
 - `artifacts/MANIFEST.txt`
 
@@ -256,4 +257,5 @@ cd /home/ubuntu/DATA2/workspace/xmh/IsaacLab-Arena
 - `object_kinematic_traj.npz`
 - `replay_actions.hdf5`（motion 回放文件）
 - `human_object_results.pkl`
+- `smallbox.usd`（HOIFHLI 对象运行时转换结果）
 - 回放视频 `*.mp4`
