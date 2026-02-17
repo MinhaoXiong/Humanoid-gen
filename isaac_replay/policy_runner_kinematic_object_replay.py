@@ -308,12 +308,6 @@ def main():
         fp_frames = []
         tp_frames = []
 
-        if object_only:
-            step_budget = object_replayer.length
-            if args_cli.max_steps is not None:
-                step_budget = min(step_budget, args_cli.max_steps)
-        else:
-            step_budget = policy_steps if args_cli.max_steps is None else min(policy_steps, args_cli.max_steps)
         object_replayer = ObjectKinematicReplayer(
             object_traj_path=args_cli.kin_traj_path,
             object_asset_name=args_cli.kin_asset_name,
@@ -321,6 +315,13 @@ def main():
             hold_last_pose=not args_cli.kin_no_hold_last_pose,
             start_step=args_cli.kin_start_step,
         )
+
+        if object_only:
+            step_budget = object_replayer.length
+            if args_cli.max_steps is not None:
+                step_budget = min(step_budget, args_cli.max_steps)
+        else:
+            step_budget = policy_steps if args_cli.max_steps is None else min(policy_steps, args_cli.max_steps)
 
         # lazy import to avoid app startup stalls
         from isaaclab_arena.metrics.metrics import compute_metrics
