@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+PACK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
 OUT_DIR=${1:-"/tmp/g1_bridge_run1"}
 VIDEO_PREFIX=${2:-"g1_bridge_run1"}
-VIDEO_DIR=${3:-"/home/ubuntu/DATA2/workspace/xmh/IsaacLab-Arena/.workflow_data/videos"}
+VIDEO_DIR=${3:-"$PACK_ROOT/output/videos"}
 
 mkdir -p "$VIDEO_DIR"
 
-cd /home/ubuntu/DATA2/workspace/xmh/IsaacLab-Arena
-/home/ubuntu/miniconda3/envs/isaaclab_arena/bin/python isaaclab_arena/examples/policy_runner_kinematic_object_replay.py \
+ISAAC_ROOT="$PACK_ROOT/repos/IsaacLab-Arena"
+PYTHON="${ISAAC_PYTHON:-$(command -v python3)}"
+
+cd "$ISAAC_ROOT"
+"$PYTHON" isaaclab_arena/examples/policy_runner_kinematic_object_replay.py \
   --headless --device cpu --enable_cameras \
   --policy_type replay \
   --replay_file_path "$OUT_DIR/replay_actions.hdf5" \

@@ -1,0 +1,6 @@
+[submodule "repos/hoifhli_release"]
+	path = repos/hoifhli_release
+	url = https://github.com/zhenkirito123/hoifhli_release.git
+[submodule "repos/IsaacLab-Arena"]
+	path = repos/IsaacLab-Arena
+	url = https://github.com/isaac-sim/IsaacLab-Arena.git

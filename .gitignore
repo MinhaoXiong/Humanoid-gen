@@ -1,3 +1,19 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# 大文件 / 生成产物
+*.pkl
+*.hdf5
+*.npz
+*.pt
+*.pth
+*.ckpt
+*.tar.gz
+*.tar.bz2
+
+# 输出目录
+output/
+
+# 数据目录（通过 download_data.sh 获取）
+data/downloaded/

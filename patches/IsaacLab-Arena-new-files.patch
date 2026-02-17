@@ -1,0 +1,1397 @@
+diff --git a/tools/hoi_bodex_g1_bridge/build_replay.py b/tools/hoi_bodex_g1_bridge/build_replay.py
+new file mode 100644
+index 00000000..77492d5f
+--- /dev/null
++++ b/tools/hoi_bodex_g1_bridge/build_replay.py
+@@ -0,0 +1,650 @@
++#!/usr/bin/env python3
++"""Build G1 WBC+PINK replay actions from HOI object motion and optional BODex grasp."""
++
++from __future__ import annotations
++
++import argparse
++import json
++import math
++import os
++import pickle
++from dataclasses import dataclass
++from typing import Any
++
++import h5py
++import numpy as np
++import torch
++
++
++# 23D layout from isaaclab_arena_g1/.../action_constants.py
++LEFT_HAND_STATE_IDX = 0
++RIGHT_HAND_STATE_IDX = 1
++LEFT_WRIST_POS_START_IDX = 2
++LEFT_WRIST_POS_END_IDX = 5
++LEFT_WRIST_QUAT_START_IDX = 5
++LEFT_WRIST_QUAT_END_IDX = 9
++RIGHT_WRIST_POS_START_IDX = 9
++RIGHT_WRIST_POS_END_IDX = 12
++RIGHT_WRIST_QUAT_START_IDX = 12
++RIGHT_WRIST_QUAT_END_IDX = 16
++NAV_CMD_START_IDX = 16
++NAV_CMD_END_IDX = 19
++BASE_HEIGHT_IDX = 19
++TORSO_RPY_START_IDX = 20
++TORSO_RPY_END_IDX = 23
++ACTION_DIM = 23
++
++
++@dataclass
++class RelativeHandPose:
++    pregrasp_pos_obj: np.ndarray
++    pregrasp_quat_obj_wxyz: np.ndarray
++    grasp_pos_obj: np.ndarray
++    grasp_quat_obj_wxyz: np.ndarray
++    source: str
++    meta: dict[str, Any]
++
++
++def _parse_csv_floats(text: str, expected_len: int, name: str) -> np.ndarray:
++    values = [float(x.strip()) for x in text.split(",")]
++    if len(values) != expected_len:
++        raise ValueError(f"{name} expects {expected_len} values, got {len(values)}: {text}")
++    return np.asarray(values, dtype=np.float64)
++
++
++def _to_numpy(x: Any) -> np.ndarray:
++    if isinstance(x, np.ndarray):
++        return x
++    if torch.is_tensor(x):
++        return x.detach().cpu().numpy()
++    return np.asarray(x)
++
++
++def _normalize_quat_wxyz(q: np.ndarray) -> np.ndarray:
++    q = np.asarray(q, dtype=np.float64)
++    norm = np.linalg.norm(q)
++    if norm < 1e-12:
++        raise ValueError("Quaternion norm is too small.")
++    q = q / norm
++    if q[0] < 0:
++        q = -q
++    return q
++
++
++def _quat_to_rotmat_wxyz(q: np.ndarray) -> np.ndarray:
++    q = _normalize_quat_wxyz(q)
++    w, x, y, z = q
++    return np.array(
++        [
++            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
++            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
++            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
++        ],
++        dtype=np.float64,
++    )
++
++
++def _rotmat_to_quat_wxyz(r: np.ndarray) -> np.ndarray:
++    r = np.asarray(r, dtype=np.float64)
++    tr = np.trace(r)
++    if tr > 0:
++        s = math.sqrt(tr + 1.0) * 2.0
++        qw = 0.25 * s
++        qx = (r[2, 1] - r[1, 2]) / s
++        qy = (r[0, 2] - r[2, 0]) / s
++        qz = (r[1, 0] - r[0, 1]) / s
++    else:
++        if r[0, 0] > r[1, 1] and r[0, 0] > r[2, 2]:
++            s = math.sqrt(1.0 + r[0, 0] - r[1, 1] - r[2, 2]) * 2.0
++            qw = (r[2, 1] - r[1, 2]) / s
++            qx = 0.25 * s
++            qy = (r[0, 1] + r[1, 0]) / s
++            qz = (r[0, 2] + r[2, 0]) / s
++        elif r[1, 1] > r[2, 2]:
++            s = math.sqrt(1.0 + r[1, 1] - r[0, 0] - r[2, 2]) * 2.0
++            qw = (r[0, 2] - r[2, 0]) / s
++            qx = (r[0, 1] + r[1, 0]) / s
++            qy = 0.25 * s
++            qz = (r[1, 2] + r[2, 1]) / s
++        else:
++            s = math.sqrt(1.0 + r[2, 2] - r[0, 0] - r[1, 1]) * 2.0
++            qw = (r[1, 0] - r[0, 1]) / s
++            qx = (r[0, 2] + r[2, 0]) / s
++            qy = (r[1, 2] + r[2, 1]) / s
++            qz = 0.25 * s
++    return _normalize_quat_wxyz(np.array([qw, qx, qy, qz], dtype=np.float64))
++
++
++def _slerp_wxyz(q0: np.ndarray, q1: np.ndarray, alpha: float) -> np.ndarray:
++    q0 = _normalize_quat_wxyz(q0)
++    q1 = _normalize_quat_wxyz(q1)
++    dot = float(np.dot(q0, q1))
++    if dot < 0:
++        q1 = -q1
++        dot = -dot
++    dot = min(1.0, max(-1.0, dot))
++    if dot > 0.9995:
++        return _normalize_quat_wxyz((1.0 - alpha) * q0 + alpha * q1)
++    theta_0 = math.acos(dot)
++    theta = theta_0 * alpha
++    sin_theta = math.sin(theta)
++    sin_theta_0 = math.sin(theta_0)
++    s0 = math.cos(theta) - dot * sin_theta / sin_theta_0
++    s1 = sin_theta / sin_theta_0
++    return _normalize_quat_wxyz(s0 * q0 + s1 * q1)
++
++
++def _wrap_to_pi(x: float) -> float:
++    return (x + math.pi) % (2.0 * math.pi) - math.pi
++
++
++def _pose_matrix_from_pos_quat(pos: np.ndarray, quat_wxyz: np.ndarray) -> np.ndarray:
++    t = np.eye(4, dtype=np.float64)
++    t[:3, :3] = _quat_to_rotmat_wxyz(quat_wxyz)
++    t[:3, 3] = np.asarray(pos, dtype=np.float64)
++    return t
++
++
++def _pos_quat_from_pose_matrix(t: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
++    return np.asarray(t[:3, 3], dtype=np.float64), _rotmat_to_quat_wxyz(t[:3, :3])
++
++
++def _invert_pose_matrix(t: np.ndarray) -> np.ndarray:
++    out = np.eye(4, dtype=np.float64)
++    r = t[:3, :3]
++    p = t[:3, 3]
++    out[:3, :3] = r.T
++    out[:3, 3] = -r.T @ p
++    return out
++
++
++def _resample_positions(pos: np.ndarray, src_fps: float, dst_fps: float) -> np.ndarray:
++    if pos.shape[0] == 1 or abs(src_fps - dst_fps) < 1e-9:
++        return pos.copy()
++    src_len = pos.shape[0]
++    duration = (src_len - 1) / src_fps
++    dst_len = int(round(duration * dst_fps)) + 1
++    t_src = np.arange(src_len, dtype=np.float64) / src_fps
++    t_dst = np.arange(dst_len, dtype=np.float64) / dst_fps
++    out = np.zeros((dst_len, pos.shape[1]), dtype=np.float64)
++    for d in range(pos.shape[1]):
++        out[:, d] = np.interp(t_dst, t_src, pos[:, d])
++    return out
++
++
++def _resample_rotmats(rotmats: np.ndarray, src_fps: float, dst_fps: float) -> np.ndarray:
++    if rotmats.shape[0] == 1 or abs(src_fps - dst_fps) < 1e-9:
++        return rotmats.copy()
++    src_len = rotmats.shape[0]
++    duration = (src_len - 1) / src_fps
++    dst_len = int(round(duration * dst_fps)) + 1
++    t_src = np.arange(src_len, dtype=np.float64) / src_fps
++    t_dst = np.arange(dst_len, dtype=np.float64) / dst_fps
++    q_src = np.stack([_rotmat_to_quat_wxyz(rotmats[i]) for i in range(src_len)], axis=0)
++    out_quat = np.zeros((dst_len, 4), dtype=np.float64)
++    for i, t in enumerate(t_dst):
++        j = int(np.searchsorted(t_src, t, side="right") - 1)
++        j = max(0, min(j, src_len - 2))
++        t0 = t_src[j]
++        t1 = t_src[j + 1]
++        alpha = 0.0 if t1 <= t0 else (t - t0) / (t1 - t0)
++        out_quat[i] = _slerp_wxyz(q_src[j], q_src[j + 1], float(alpha))
++    return np.stack([_quat_to_rotmat_wxyz(q) for q in out_quat], axis=0)
++
++
++def _load_hoi_human_object_results(path: str) -> tuple[np.ndarray, np.ndarray, str]:
++    original_torch_load = torch.load
++
++    def _cpu_torch_load(*args, **kwargs):
++        kwargs.setdefault("map_location", torch.device("cpu"))
++        return original_torch_load(*args, **kwargs)
++
++    torch.load = _cpu_torch_load
++    try:
++        with open(path, "rb") as f:
++            data = pickle.load(f)
++    finally:
++        torch.load = original_torch_load
++
++    if "obj_pos" not in data or "obj_rot_mat" not in data:
++        raise KeyError(f"{path} does not contain required keys: obj_pos, obj_rot_mat")
++
++    obj_pos = _to_numpy(data["obj_pos"]).astype(np.float64)
++    obj_rot = _to_numpy(data["obj_rot_mat"]).astype(np.float64)
++    object_name = str(data.get("object_name", "unknown_object"))
++    if obj_pos.ndim != 2 or obj_pos.shape[1] != 3:
++        raise ValueError(f"obj_pos should have shape [T,3], got {obj_pos.shape}")
++    if obj_rot.ndim != 3 or obj_rot.shape[1:] != (3, 3):
++        raise ValueError(f"obj_rot_mat should have shape [T,3,3], got {obj_rot.shape}")
++    if obj_pos.shape[0] != obj_rot.shape[0]:
++        raise ValueError(f"obj_pos length {obj_pos.shape[0]} != obj_rot_mat length {obj_rot.shape[0]}")
++    return obj_pos, obj_rot, object_name
++
++
++def _maybe_unbox_numpy_item(value: Any) -> Any:
++    if isinstance(value, np.ndarray) and value.dtype == object and value.shape == ():
++        return value.item()
++    return value
++
++
++def _select_bodex_object_pose(world_cfg: dict[str, Any], manip_name: str | None) -> tuple[str, np.ndarray]:
++    if "mesh" not in world_cfg:
++        raise KeyError("BODex world_cfg does not contain 'mesh' entries.")
++    mesh_dict = world_cfg["mesh"]
++    if not isinstance(mesh_dict, dict) or len(mesh_dict) == 0:
++        raise ValueError("BODex world_cfg['mesh'] is empty.")
++    if manip_name and manip_name in mesh_dict:
++        key = manip_name
++    else:
++        key = sorted(mesh_dict.keys())[0]
++    pose = np.asarray(mesh_dict[key]["pose"], dtype=np.float64)
++    if pose.shape[0] != 7:
++        raise ValueError(f"Object pose should have 7 values [x,y,z,qw,qx,qy,qz], got {pose.shape}")
++    return key, pose
++
++
++def _extract_relative_pose_from_bodex(
++    bodex_grasp_npy: str,
++    grasp_id: int,
++    pregrasp_stage_idx: int,
++    grasp_stage_idx: int,
++) -> RelativeHandPose:
++    raw = np.load(bodex_grasp_npy, allow_pickle=True)
++    if isinstance(raw, np.ndarray) and raw.shape == ():
++        data = raw.item()
++    elif isinstance(raw, dict):
++        data = raw
++    else:
++        raise ValueError(f"Unexpected BODex npy format: {type(raw)}")
++
++    robot_pose = _maybe_unbox_numpy_item(data["robot_pose"])
++    robot_pose = np.asarray(robot_pose, dtype=np.float64)
++    while robot_pose.ndim > 3 and robot_pose.shape[0] == 1:
++        robot_pose = robot_pose[0]
++    if robot_pose.ndim == 2:
++        robot_pose = robot_pose[None, :, :]
++    if robot_pose.ndim != 3:
++        raise ValueError(f"BODex robot_pose should be [N,Stage,Q], got {robot_pose.shape}")
++    if not (0 <= grasp_id < robot_pose.shape[0]):
++        raise IndexError(f"grasp_id {grasp_id} is out of range for robot_pose first dim {robot_pose.shape[0]}")
++
++    stages = robot_pose[grasp_id]
++    for idx, stage_name in [(pregrasp_stage_idx, "pregrasp_stage_idx"), (grasp_stage_idx, "grasp_stage_idx")]:
++        if idx < 0 or idx >= stages.shape[0]:
++            raise IndexError(f"{stage_name} {idx} out of range, stage count is {stages.shape[0]}")
++    if stages.shape[1] < 7:
++        raise ValueError(f"BODex robot_pose last dim should be >=7 (root pose + q), got {stages.shape[1]}")
++
++    pregrasp_root = stages[pregrasp_stage_idx, :7]
++    grasp_root = stages[grasp_stage_idx, :7]
++
++    world_cfg = _maybe_unbox_numpy_item(data.get("world_cfg"))
++    if not isinstance(world_cfg, dict):
++        raise ValueError("BODex grasp npy does not contain a valid dict world_cfg.")
++    manip_name = data.get("manip_name", None)
++    if isinstance(manip_name, np.ndarray):
++        manip_name = str(manip_name.tolist())
++    elif manip_name is not None:
++        manip_name = str(manip_name)
++    mesh_key, obj_pose = _select_bodex_object_pose(world_cfg, manip_name)
++
++    t_obj_w = _pose_matrix_from_pos_quat(obj_pose[:3], obj_pose[3:])
++    t_w_obj = _invert_pose_matrix(t_obj_w)
++    t_pre_w = _pose_matrix_from_pos_quat(pregrasp_root[:3], pregrasp_root[3:])
++    t_grasp_w = _pose_matrix_from_pos_quat(grasp_root[:3], grasp_root[3:])
++
++    t_pre_obj = t_w_obj @ t_pre_w
++    t_grasp_obj = t_w_obj @ t_grasp_w
++    pre_pos_obj, pre_quat_obj = _pos_quat_from_pose_matrix(t_pre_obj)
++    grasp_pos_obj, grasp_quat_obj = _pos_quat_from_pose_matrix(t_grasp_obj)
++
++    return RelativeHandPose(
++        pregrasp_pos_obj=pre_pos_obj,
++        pregrasp_quat_obj_wxyz=pre_quat_obj,
++        grasp_pos_obj=grasp_pos_obj,
++        grasp_quat_obj_wxyz=grasp_quat_obj,
++        source="bodex_grasp_npy",
++        meta={
++            "grasp_npy": os.path.abspath(bodex_grasp_npy),
++            "grasp_id": grasp_id,
++            "pregrasp_stage_idx": pregrasp_stage_idx,
++            "grasp_stage_idx": grasp_stage_idx,
++            "selected_mesh_key": mesh_key,
++        },
++    )
++
++
++def _build_relative_pose_from_manual_args(args: argparse.Namespace) -> RelativeHandPose:
++    return RelativeHandPose(
++        pregrasp_pos_obj=_parse_csv_floats(args.pregrasp_pos_obj, 3, "pregrasp_pos_obj"),
++        pregrasp_quat_obj_wxyz=_normalize_quat_wxyz(
++            _parse_csv_floats(args.pregrasp_quat_obj_wxyz, 4, "pregrasp_quat_obj_wxyz")
++        ),
++        grasp_pos_obj=_parse_csv_floats(args.grasp_pos_obj, 3, "grasp_pos_obj"),
++        grasp_quat_obj_wxyz=_normalize_quat_wxyz(_parse_csv_floats(args.grasp_quat_obj_wxyz, 4, "grasp_quat_obj_wxyz")),
++        source="manual",
++        meta={},
++    )
++
++
++def _build_base_plan_from_object(
++    obj_pos_w: np.ndarray,
++    obj_rot_w: np.ndarray,
++    target_fps: float,
++    base_offset_obj_xy: np.ndarray,
++    max_nav_speed: float,
++    nav_end_idx: int,
++    yaw_face_object: bool,
++    initial_base_yaw: float,
++) -> tuple[np.ndarray, np.ndarray]:
++    n = obj_pos_w.shape[0]
++    obj_yaw = np.arctan2(obj_rot_w[:, 1, 0], obj_rot_w[:, 0, 0])
++    base_xy = np.zeros((n, 2), dtype=np.float64)
++    base_yaw = np.zeros((n,), dtype=np.float64)
++
++    for i in range(n):
++        c = math.cos(float(obj_yaw[i]))
++        s = math.sin(float(obj_yaw[i]))
++        offset_w = np.array(
++            [
++                c * base_offset_obj_xy[0] - s * base_offset_obj_xy[1],
++                s * base_offset_obj_xy[0] + c * base_offset_obj_xy[1],
++            ],
++            dtype=np.float64,
++        )
++        base_xy[i] = obj_pos_w[i, :2] + offset_w
++        if yaw_face_object:
++            direction = obj_pos_w[i, :2] - base_xy[i]
++            if np.linalg.norm(direction) < 1e-9:
++                base_yaw[i] = initial_base_yaw if i == 0 else base_yaw[i - 1]
++            else:
++                base_yaw[i] = math.atan2(float(direction[1]), float(direction[0]))
++        else:
++            base_yaw[i] = initial_base_yaw if i == 0 else base_yaw[i - 1]
++
++    nav_cmd = np.zeros((n, 3), dtype=np.float64)
++    for i in range(n - 1):
++        if i > nav_end_idx:
++            break
++        dxy_w = (base_xy[i + 1] - base_xy[i]) * target_fps
++        dyaw = _wrap_to_pi(float(base_yaw[i + 1] - base_yaw[i])) * target_fps
++        yaw = float(base_yaw[i])
++        vx = math.cos(yaw) * dxy_w[0] + math.sin(yaw) * dxy_w[1]
++        vy = -math.sin(yaw) * dxy_w[0] + math.cos(yaw) * dxy_w[1]
++        nav_cmd[i, 0] = float(np.clip(vx, -max_nav_speed, max_nav_speed))
++        nav_cmd[i, 1] = float(np.clip(vy, -max_nav_speed, max_nav_speed))
++        nav_cmd[i, 2] = float(np.clip(dyaw, -max_nav_speed, max_nav_speed))
++
++    if n > 1:
++        nav_cmd[-1] = nav_cmd[-2]
++
++    return np.stack([base_xy[:, 0], base_xy[:, 1], np.zeros(n), base_yaw], axis=1), nav_cmd
++
++
++def _make_parser() -> argparse.ArgumentParser:
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--hoi-pickle", required=True, help="Path to hoifhli human_object_results.pkl.")
++    parser.add_argument("--output-hdf5", required=True, help="Output replay file path (.hdf5).")
++    parser.add_argument(
++        "--output-object-traj",
++        default="object_kinematic_traj.npz",
++        help="Output object kinematic trajectory path (.npz).",
++    )
++    parser.add_argument(
++        "--output-debug-json",
++        default="bridge_debug.json",
++        help="Output debug metadata (.json).",
++    )
++    parser.add_argument("--episode-name", default="demo_0", help="HDF5 episode name.")
++
++    parser.add_argument("--hoi-fps", type=float, default=30.0, help="Input HOI trajectory FPS.")
++    parser.add_argument("--target-fps", type=float, default=50.0, help="Output replay FPS for Isaac.")
++
++    parser.add_argument(
++        "--bodex-grasp-npy",
++        default=None,
++        help="Optional BODex grasp result .npy. If absent, manual object-frame hand pose is used.",
++    )
++    parser.add_argument("--bodex-grasp-id", type=int, default=0, help="Selected grasp id in BODex robot_pose.")
++    parser.add_argument("--bodex-pregrasp-stage-idx", type=int, default=0, help="BODex stage index for pregrasp.")
++    parser.add_argument("--bodex-grasp-stage-idx", type=int, default=1, help="BODex stage index for grasp.")
++
++    parser.add_argument(
++        "--pregrasp-pos-obj",
++        default="-0.35,-0.08,0.10",
++        help="Fallback pregrasp pos in object frame.",
++    )
++    parser.add_argument(
++        "--pregrasp-quat-obj-wxyz",
++        default="1.0,0.0,0.0,0.0",
++        help="Fallback pregrasp quat in object frame (wxyz).",
++    )
++    parser.add_argument("--grasp-pos-obj", default="-0.28,-0.05,0.06", help="Fallback grasp pos in object frame.")
++    parser.add_argument(
++        "--grasp-quat-obj-wxyz",
++        default="1.0,0.0,0.0,0.0",
++        help="Fallback grasp quat in object frame (wxyz).",
++    )
++
++    parser.add_argument(
++        "--left-wrist-pos",
++        default="0.201,0.145,0.101",
++        help="Left wrist pose (pelvis frame) position xyz.",
++    )
++    parser.add_argument(
++        "--left-wrist-quat-wxyz",
++        default="1.0,0.01,-0.008,-0.011",
++        help="Left wrist pose (pelvis frame) quaternion wxyz.",
++    )
++    parser.add_argument("--base-height", type=float, default=0.75, help="Base height command.")
++    parser.add_argument("--torso-rpy", default="0.0,0.0,0.0", help="Torso orientation command roll,pitch,yaw.")
++
++    parser.add_argument(
++        "--base-offset-obj-xy",
++        default="-0.55,0.00",
++        help="Base XY offset in object local frame for auto base planning.",
++    )
++    parser.add_argument("--max-nav-speed", type=float, default=0.4, help="Clip magnitude for nav (vx,vy,wz).")
++    parser.add_argument(
++        "--yaw-face-object",
++        action="store_true",
++        help="If set, base yaw faces object during navigation planning.",
++    )
++    parser.add_argument("--initial-base-yaw", type=float, default=0.0, help="Initial yaw used when yaw-face-object is off.")
++
++    parser.add_argument(
++        "--grasp-frame-ratio",
++        type=float,
++        default=0.7,
++        help="If --grasp-time-sec is unset, grasp frame = ratio * (N-1).",
++    )
++    parser.add_argument("--grasp-time-sec", type=float, default=None, help="Absolute grasp time (seconds).")
++    parser.add_argument("--approach-duration-sec", type=float, default=0.8, help="Pregrasp->grasp interpolation duration.")
++    parser.add_argument("--close-duration-sec", type=float, default=0.2, help="Hand close stage duration.")
++    parser.add_argument("--grasp-hold-duration-sec", type=float, default=0.6, help="Post-close hold duration.")
++
++    parser.add_argument("--left-hand-state", type=float, default=0.0, help="Left hand state (0=open, 1=close).")
++    parser.add_argument("--right-hand-open-state", type=float, default=0.0, help="Right hand open state.")
++    parser.add_argument("--right-hand-close-state", type=float, default=1.0, help="Right hand close state.")
++
++    parser.add_argument("--object-name-override", default=None, help="Optional override for output object name.")
++    return parser
++
++
++def main() -> None:
++    args = _make_parser().parse_args()
++    os.makedirs(os.path.dirname(os.path.abspath(args.output_hdf5)) or ".", exist_ok=True)
++    os.makedirs(os.path.dirname(os.path.abspath(args.output_object_traj)) or ".", exist_ok=True)
++    os.makedirs(os.path.dirname(os.path.abspath(args.output_debug_json)) or ".", exist_ok=True)
++
++    obj_pos_src, obj_rot_src, object_name_src = _load_hoi_human_object_results(args.hoi_pickle)
++    object_name = args.object_name_override if args.object_name_override else object_name_src
++
++    obj_pos = _resample_positions(obj_pos_src, args.hoi_fps, args.target_fps)
++    obj_rot = _resample_rotmats(obj_rot_src, args.hoi_fps, args.target_fps)
++    n = obj_pos.shape[0]
++    if n < 2:
++        raise ValueError("Trajectory needs at least 2 frames after resampling.")
++
++    if args.bodex_grasp_npy:
++        rel_pose = _extract_relative_pose_from_bodex(
++            args.bodex_grasp_npy,
++            args.bodex_grasp_id,
++            args.bodex_pregrasp_stage_idx,
++            args.bodex_grasp_stage_idx,
++        )
++    else:
++        rel_pose = _build_relative_pose_from_manual_args(args)
++
++    if args.grasp_time_sec is not None:
++        grasp_idx = int(round(args.grasp_time_sec * args.target_fps))
++    else:
++        grasp_idx = int(round((n - 1) * args.grasp_frame_ratio))
++    grasp_idx = int(np.clip(grasp_idx, 0, n - 1))
++    approach_steps = max(1, int(round(args.approach_duration_sec * args.target_fps)))
++    close_steps = max(1, int(round(args.close_duration_sec * args.target_fps)))
++    hold_steps = max(1, int(round(args.grasp_hold_duration_sec * args.target_fps)))
++
++    approach_start = max(0, grasp_idx - approach_steps)
++    close_start = grasp_idx
++    close_end = min(n - 1, close_start + close_steps - 1)
++    hold_end = min(n - 1, close_end + hold_steps)
++    nav_end = max(0, approach_start - 1)
++
++    base_offset_obj_xy = _parse_csv_floats(args.base_offset_obj_xy, 2, "base_offset_obj_xy")
++    base_pose_xyzyaw, nav_cmd = _build_base_plan_from_object(
++        obj_pos_w=obj_pos,
++        obj_rot_w=obj_rot,
++        target_fps=args.target_fps,
++        base_offset_obj_xy=base_offset_obj_xy,
++        max_nav_speed=args.max_nav_speed,
++        nav_end_idx=nav_end,
++        yaw_face_object=args.yaw_face_object,
++        initial_base_yaw=args.initial_base_yaw,
++    )
++
++    right_wrist_pos_pelvis = np.zeros((n, 3), dtype=np.float64)
++    right_wrist_quat_pelvis = np.zeros((n, 4), dtype=np.float64)
++    for i in range(n):
++        if i <= approach_start:
++            alpha = 0.0
++        elif i >= grasp_idx:
++            alpha = 1.0
++        else:
++            alpha = float(i - approach_start) / float(max(1, grasp_idx - approach_start))
++        rel_pos = (1.0 - alpha) * rel_pose.pregrasp_pos_obj + alpha * rel_pose.grasp_pos_obj
++        rel_quat = _slerp_wxyz(rel_pose.pregrasp_quat_obj_wxyz, rel_pose.grasp_quat_obj_wxyz, alpha)
++
++        t_obj_w = np.eye(4, dtype=np.float64)
++        t_obj_w[:3, :3] = obj_rot[i]
++        t_obj_w[:3, 3] = obj_pos[i]
++        t_hand_obj = _pose_matrix_from_pos_quat(rel_pos, rel_quat)
++        t_hand_w = t_obj_w @ t_hand_obj
++
++        base_yaw = base_pose_xyzyaw[i, 3]
++        r_base_w = np.array(
++            [
++                [math.cos(base_yaw), -math.sin(base_yaw), 0.0],
++                [math.sin(base_yaw), math.cos(base_yaw), 0.0],
++                [0.0, 0.0, 1.0],
++            ],
++            dtype=np.float64,
++        )
++        p_base_w = np.array([base_pose_xyzyaw[i, 0], base_pose_xyzyaw[i, 1], base_pose_xyzyaw[i, 2]], dtype=np.float64)
++
++        p_hand_w = t_hand_w[:3, 3]
++        r_hand_w = t_hand_w[:3, :3]
++        p_hand_pelvis = r_base_w.T @ (p_hand_w - p_base_w)
++        r_hand_pelvis = r_base_w.T @ r_hand_w
++
++        right_wrist_pos_pelvis[i] = p_hand_pelvis
++        right_wrist_quat_pelvis[i] = _rotmat_to_quat_wxyz(r_hand_pelvis)
++
++    left_wrist_pos = _parse_csv_floats(args.left_wrist_pos, 3, "left_wrist_pos")
++    left_wrist_quat = _normalize_quat_wxyz(_parse_csv_floats(args.left_wrist_quat_wxyz, 4, "left_wrist_quat_wxyz"))
++    torso_rpy = _parse_csv_floats(args.torso_rpy, 3, "torso_rpy")
++
++    actions = np.zeros((n, ACTION_DIM), dtype=np.float32)
++    actions[:, LEFT_HAND_STATE_IDX] = np.float32(args.left_hand_state)
++    actions[:, RIGHT_HAND_STATE_IDX] = np.float32(args.right_hand_open_state)
++    actions[close_start : hold_end + 1, RIGHT_HAND_STATE_IDX] = np.float32(args.right_hand_close_state)
++
++    actions[:, LEFT_WRIST_POS_START_IDX:LEFT_WRIST_POS_END_IDX] = left_wrist_pos.astype(np.float32)
++    actions[:, LEFT_WRIST_QUAT_START_IDX:LEFT_WRIST_QUAT_END_IDX] = left_wrist_quat.astype(np.float32)
++    actions[:, RIGHT_WRIST_POS_START_IDX:RIGHT_WRIST_POS_END_IDX] = right_wrist_pos_pelvis.astype(np.float32)
++    actions[:, RIGHT_WRIST_QUAT_START_IDX:RIGHT_WRIST_QUAT_END_IDX] = right_wrist_quat_pelvis.astype(np.float32)
++    actions[:, NAV_CMD_START_IDX:NAV_CMD_END_IDX] = nav_cmd.astype(np.float32)
++    actions[:, BASE_HEIGHT_IDX] = np.float32(args.base_height)
++    actions[:, TORSO_RPY_START_IDX:TORSO_RPY_END_IDX] = torso_rpy.astype(np.float32)
++
++    with h5py.File(args.output_hdf5, "w") as f:
++        grp = f.create_group("data")
++        grp.attrs["total"] = int(n)
++        grp.attrs["env_args"] = json.dumps({"env_name": "", "type": 2, "generator": "hoi_bodex_g1_bridge"})
++        ep = grp.create_group(args.episode_name)
++        ep.attrs["num_samples"] = int(n)
++        ep.create_dataset("actions", data=actions, compression="gzip")
++
++    obj_quat = np.stack([_rotmat_to_quat_wxyz(r) for r in obj_rot], axis=0).astype(np.float32)
++    np.savez_compressed(
++        args.output_object_traj,
++        object_name=np.array(object_name),
++        fps=np.array([args.target_fps], dtype=np.float32),
++        object_pos_w=obj_pos.astype(np.float32),
++        object_quat_wxyz=obj_quat,
++        object_rot_mat_w=obj_rot.astype(np.float32),
++    )
++
++    debug = {
++        "inputs": {
++            "hoi_pickle": os.path.abspath(args.hoi_pickle),
++            "bodex_grasp_npy": os.path.abspath(args.bodex_grasp_npy) if args.bodex_grasp_npy else None,
++            "hoi_fps": args.hoi_fps,
++            "target_fps": args.target_fps,
++        },
++        "outputs": {
++            "hdf5": os.path.abspath(args.output_hdf5),
++            "object_traj": os.path.abspath(args.output_object_traj),
++            "episode_name": args.episode_name,
++        },
++        "object_name": object_name,
++        "length": {
++            "src_frames": int(obj_pos_src.shape[0]),
++            "dst_frames": int(n),
++            "duration_sec": float((n - 1) / args.target_fps),
++        },
++        "stages": {
++            "navigation": {"start": 0, "end": int(nav_end)},
++            "pregrasp": {"start": int(nav_end + 1), "end": int(approach_start)},
++            "approach": {"start": int(approach_start), "end": int(grasp_idx)},
++            "grasp_close": {"start": int(close_start), "end": int(close_end)},
++            "grasp_hold": {"start": int(close_end + 1), "end": int(hold_end)},
++        },
++        "relative_hand_pose": {
++            "source": rel_pose.source,
++            "pregrasp_pos_obj": rel_pose.pregrasp_pos_obj.tolist(),
++            "pregrasp_quat_obj_wxyz": rel_pose.pregrasp_quat_obj_wxyz.tolist(),
++            "grasp_pos_obj": rel_pose.grasp_pos_obj.tolist(),
++            "grasp_quat_obj_wxyz": rel_pose.grasp_quat_obj_wxyz.tolist(),
++            "meta": rel_pose.meta,
++        },
++        "sanity": {
++            "nav_cmd_abs_max": np.max(np.abs(actions[:, NAV_CMD_START_IDX:NAV_CMD_END_IDX]), axis=0).tolist(),
++            "right_wrist_pos_range": {
++                "min": right_wrist_pos_pelvis.min(axis=0).tolist(),
++                "max": right_wrist_pos_pelvis.max(axis=0).tolist(),
++            },
++            "right_wrist_quat_first": right_wrist_quat_pelvis[0].tolist(),
++        },
++    }
++    with open(args.output_debug_json, "w", encoding="utf-8") as f:
++        json.dump(debug, f, indent=2)
++
++    print(f"[bridge] HOI frames: {obj_pos_src.shape[0]} @ {args.hoi_fps:.3f}Hz -> {n} @ {args.target_fps:.3f}Hz")
++    print(f"[bridge] Action replay saved: {os.path.abspath(args.output_hdf5)}")
++    print(f"[bridge] Object kinematic traj saved: {os.path.abspath(args.output_object_traj)}")
++    print(f"[bridge] Debug metadata saved: {os.path.abspath(args.output_debug_json)}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/isaaclab_arena/examples/policy_runner_kinematic_object_replay.py b/isaaclab_arena/examples/policy_runner_kinematic_object_replay.py
+new file mode 100644
+index 00000000..ded0a925
+--- /dev/null
++++ b/isaaclab_arena/examples/policy_runner_kinematic_object_replay.py
+@@ -0,0 +1,379 @@
++#!/usr/bin/env python3
++"""Policy runner with kinematic object replay from a trajectory file."""
++
++from __future__ import annotations
++
++import numpy as np
++import os
++import random
++import torch
++import tqdm
++
++from isaaclab_arena.cli.isaaclab_arena_cli import get_isaaclab_arena_cli_parser
++from isaaclab_arena.examples.example_environments.cli import (
++    get_arena_builder_from_cli,
++    get_isaaclab_arena_example_environment_cli_parser,
++)
++from isaaclab_arena.examples.policy_runner_cli import (
++    add_gr00t_closedloop_arguments,
++    add_replay_arguments,
++    add_replay_lerobot_arguments,
++    add_zero_action_arguments,
++    create_policy,
++)
++from isaaclab_arena.utils.isaaclab_utils.simulation_app import SimulationAppContext
++
++
++def _setup_policy_argument_parser_without_parse(args_parser):
++    args_parser = get_isaaclab_arena_example_environment_cli_parser(args_parser)
++    args_parser.add_argument(
++        "--policy_type",
++        type=str,
++        choices=["zero_action", "replay", "replay_lerobot", "gr00t_closedloop"],
++        required=True,
++        help="Type of policy to use.",
++    )
++    add_zero_action_arguments(args_parser)
++    add_replay_arguments(args_parser)
++    add_replay_lerobot_arguments(args_parser)
++    add_gr00t_closedloop_arguments(args_parser)
++    return args_parser
++
++
++def _add_object_replay_args(parser):
++    parser.add_argument(
++        "--kin-traj-path",
++        type=str,
++        required=True,
++        help="Path to object kinematic trajectory npz from tools/hoi_bodex_g1_bridge/build_replay.py",
++    )
++    parser.add_argument(
++        "--kin-asset-name",
++        type=str,
++        default="pick_up_object",
++        help="Asset name in env.scene to be overwritten by kinematic replay.",
++    )
++    parser.add_argument(
++        "--kin-start-step",
++        type=int,
++        default=0,
++        help="Simulation step offset to start applying object trajectory.",
++    )
++    parser.add_argument(
++        "--kin-apply-timing",
++        type=str,
++        choices=["pre_step", "post_step"],
++        default="pre_step",
++        help="Apply object kinematic pose before or after env.step(action).",
++    )
++    parser.add_argument(
++        "--kin-no-hold-last-pose",
++        action="store_true",
++        help="If set, do not keep writing last object pose after trajectory end.",
++    )
++    parser.add_argument(
++        "--max-steps",
++        type=int,
++        default=None,
++        help="Optional cap on simulation steps. By default, replay policy length is used.",
++    )
++
++
++def _add_video_args(parser):
++    parser.add_argument(
++        "--save-video",
++        action="store_true",
++        help="Save first-person replay video from camera observations.",
++    )
++    parser.add_argument(
++        "--video-output-dir",
++        type=str,
++        default="/home/ubuntu/DATA2/workspace/xmh/IsaacLab-Arena/.workflow_data/videos",
++        help="Directory to save output videos.",
++    )
++    parser.add_argument(
++        "--video-prefix",
++        type=str,
++        default="g1_kin_replay",
++        help="Output filename prefix for saved videos.",
++    )
++    parser.add_argument(
++        "--video-fps",
++        type=int,
++        default=30,
++        help="Output video FPS.",
++    )
++    parser.add_argument(
++        "--save-third-person",
++        action="store_true",
++        help="Also save a third-person and combined video (slower).",
++    )
++
++
++def _to_uint8_rgb(frame: np.ndarray) -> np.ndarray:
++    arr = np.asarray(frame)
++    if arr.ndim != 3:
++        raise ValueError(f"Expected HxWxC frame, got shape: {arr.shape}")
++    if arr.shape[2] == 4:
++        arr = arr[:, :, :3]
++    if np.issubdtype(arr.dtype, np.floating):
++        max_val = float(np.nanmax(arr)) if arr.size > 0 else 1.0
++        if max_val <= 1.5:
++            arr = arr * 255.0
++        arr = np.clip(arr, 0.0, 255.0).astype(np.uint8)
++    else:
++        arr = np.clip(arr, 0, 255).astype(np.uint8)
++    return arr
++
++
++def _save_frames_to_video(frames, video_path, fps=30):
++    import av
++
++    if not frames:
++        return
++    container = av.open(video_path, mode="w")
++    h, w = frames[0].shape[:2]
++    stream = container.add_stream("h264", rate=fps)
++    stream.width = w
++    stream.height = h
++    stream.pix_fmt = "yuv420p"
++    stream.options = {"crf": "18", "profile:v": "high"}
++    for frame_data in frames:
++        av_frame = av.VideoFrame.from_ndarray(frame_data, format="rgb24")
++        for packet in stream.encode(av_frame):
++            container.mux(packet)
++    for packet in stream.encode():
++        container.mux(packet)
++    container.close()
++    print(f"Video saved to: {video_path} ({len(frames)} frames)")
++
++
++def _create_third_person_camera(width=640, height=480, follow_offset=(2.0, -1.2, 1.4)):
++    import omni.replicator.core as rep
++    import omni.usd
++    from pxr import Gf, UsdGeom
++
++    stage = omni.usd.get_context().get_stage()
++    cam_path = "/World/ThirdPersonCam"
++
++    cam_prim = stage.DefinePrim(cam_path, "Camera")
++    cam = UsdGeom.Camera(cam_prim)
++    cam.GetFocalLengthAttr().Set(24.0)
++    cam.GetHorizontalApertureAttr().Set(20.955)
++    cam.GetClippingRangeAttr().Set(Gf.Vec2f(0.1, 20.0))
++
++    xform = UsdGeom.Xformable(cam_prim)
++    xform.ClearXformOpOrder()
++    translate_op = xform.AddTranslateOp()
++    rotate_op = xform.AddRotateXYZOp()
++    translate_op.Set(Gf.Vec3d(*follow_offset))
++    rotate_op.Set(Gf.Vec3f(-30.0, 0.0, 140.0))
++
++    rp = rep.create.render_product(cam_path, (width, height))
++    rgb_annot = rep.AnnotatorRegistry.get_annotator("rgb")
++    rgb_annot.attach([rp])
++
++    return rgb_annot, translate_op, rotate_op, np.array(follow_offset, dtype=np.float32)
++
++
++def _extract_robot_pos(obs, env):
++    policy_obs = obs.get("policy") if isinstance(obs, dict) else None
++    if isinstance(policy_obs, dict):
++        robot_pos = policy_obs.get("robot_pos")
++        if robot_pos is not None:
++            return robot_pos[0].detach().cpu().numpy()
++    try:
++        return env.scene["robot"].data.root_pos_w[0].detach().cpu().numpy()
++    except Exception:
++        return None
++
++
++def _update_third_person_camera(translate_op, rotate_op, robot_pos, follow_offset):
++    from pxr import Gf
++
++    target = np.asarray(robot_pos, dtype=np.float32)[:3]
++    cam_pos = target + follow_offset
++    look = target - cam_pos
++    horiz = float(np.linalg.norm(look[:2])) + 1e-6
++    yaw_deg = float(np.degrees(np.arctan2(look[1], look[0])))
++    pitch_deg = float(-np.degrees(np.arctan2(abs(look[2]), horiz)))
++    translate_op.Set(Gf.Vec3d(float(cam_pos[0]), float(cam_pos[1]), float(cam_pos[2])))
++    rotate_op.Set(Gf.Vec3f(pitch_deg, 0.0, yaw_deg))
++
++
++def _read_third_person_frame(rgb_annot):
++    data = rgb_annot.get_data()
++    if data is None or len(data) == 0:
++        return None
++    return _to_uint8_rgb(np.array(data))
++
++
++class ObjectKinematicReplayer:
++    def __init__(
++        self,
++        object_traj_path: str,
++        object_asset_name: str,
++        device: torch.device,
++        hold_last_pose: bool,
++        start_step: int,
++    ):
++        data = np.load(object_traj_path, allow_pickle=True)
++        if "object_pos_w" not in data or "object_quat_wxyz" not in data:
++            raise KeyError(
++                f"{object_traj_path} must contain object_pos_w and object_quat_wxyz. "
++                f"Found keys: {list(data.keys())}"
++            )
++        self.object_pos_w = torch.as_tensor(data["object_pos_w"], dtype=torch.float32, device=device)
++        self.object_quat_wxyz = torch.as_tensor(data["object_quat_wxyz"], dtype=torch.float32, device=device)
++        if self.object_pos_w.ndim != 2 or self.object_pos_w.shape[1] != 3:
++            raise ValueError(f"object_pos_w should be [T,3], got {tuple(self.object_pos_w.shape)}")
++        if self.object_quat_wxyz.ndim != 2 or self.object_quat_wxyz.shape[1] != 4:
++            raise ValueError(f"object_quat_wxyz should be [T,4], got {tuple(self.object_quat_wxyz.shape)}")
++        if self.object_pos_w.shape[0] != self.object_quat_wxyz.shape[0]:
++            raise ValueError(
++                f"object_pos_w length {self.object_pos_w.shape[0]} != object_quat_wxyz length {self.object_quat_wxyz.shape[0]}"
++            )
++
++        self.object_asset_name = object_asset_name
++        self.hold_last_pose = hold_last_pose
++        self.start_step = max(0, int(start_step))
++        self.length = int(self.object_pos_w.shape[0])
++        self.zero_vel = torch.zeros((1, 6), dtype=torch.float32, device=device)
++
++    def _step_to_index(self, step: int) -> int | None:
++        if step < self.start_step:
++            return None
++        idx = step - self.start_step
++        if idx >= self.length:
++            if not self.hold_last_pose:
++                return None
++            idx = self.length - 1
++        return idx
++
++    def apply(self, env, step: int) -> None:
++        idx = self._step_to_index(step)
++        if idx is None:
++            return
++        if env.num_envs != 1:
++            raise ValueError("Kinematic object replay currently supports num_envs == 1 only.")
++        asset = env.scene[self.object_asset_name]
++        pose_w = torch.cat(
++            [self.object_pos_w[idx].unsqueeze(0), self.object_quat_wxyz[idx].unsqueeze(0)],
++            dim=-1,
++        )
++        env_ids = torch.tensor([0], device=env.device, dtype=torch.long)
++        asset.write_root_pose_to_sim(pose_w, env_ids=env_ids)
++        asset.write_root_velocity_to_sim(self.zero_vel, env_ids=env_ids)
++
++
++def main():
++    args_parser = get_isaaclab_arena_cli_parser()
++    args_cli, _ = args_parser.parse_known_args()
++
++    with SimulationAppContext(args_cli):
++        args_parser = _setup_policy_argument_parser_without_parse(args_parser)
++        _add_object_replay_args(args_parser)
++        _add_video_args(args_parser)
++        args_cli = args_parser.parse_args()
++        if args_cli.policy_type == "replay" and args_cli.replay_file_path is None:
++            raise ValueError("--replay_file_path is required when using --policy_type replay")
++        if args_cli.policy_type == "replay_lerobot" and args_cli.config_yaml_path is None:
++            raise ValueError("--config_yaml_path is required when using --policy_type replay_lerobot")
++        if args_cli.policy_type == "gr00t_closedloop" and args_cli.policy_config_yaml_path is None:
++            raise ValueError("--policy_config_yaml_path is required when using --policy_type gr00t_closedloop")
++
++        arena_builder = get_arena_builder_from_cli(args_cli)
++        env = arena_builder.make_registered()
++
++        if args_cli.seed is not None:
++            env.seed(args_cli.seed)
++            torch.manual_seed(args_cli.seed)
++            np.random.seed(args_cli.seed)
++            random.seed(args_cli.seed)
++
++        obs, _ = env.reset()
++        policy, policy_steps = create_policy(args_cli)
++        tp_camera = _create_third_person_camera() if (args_cli.save_video and args_cli.save_third_person) else None
++        fp_frames = []
++        tp_frames = []
++
++        step_budget = policy_steps if args_cli.max_steps is None else min(policy_steps, args_cli.max_steps)
++        object_replayer = ObjectKinematicReplayer(
++            object_traj_path=args_cli.kin_traj_path,
++            object_asset_name=args_cli.kin_asset_name,
++            device=env.device,
++            hold_last_pose=not args_cli.kin_no_hold_last_pose,
++            start_step=args_cli.kin_start_step,
++        )
++
++        # lazy import to avoid app startup stalls
++        from isaaclab_arena.metrics.metrics import compute_metrics
++
++        for step in tqdm.tqdm(range(step_budget)):
++            with torch.inference_mode():
++                if args_cli.kin_apply_timing == "pre_step":
++                    object_replayer.apply(env, step)
++
++                actions = policy.get_action(env, obs)
++                if actions is None:
++                    print(f"Policy returned None at step {step}, stopping replay.")
++                    break
++                obs, _, terminated, truncated, _ = env.step(actions)
++
++                if args_cli.kin_apply_timing == "post_step":
++                    object_replayer.apply(env, step)
++
++                if args_cli.save_video:
++                    if "camera_obs" in obs:
++                        cam_keys = list(obs["camera_obs"].keys())
++                        if cam_keys:
++                            cam_img = obs["camera_obs"][cam_keys[0]]
++                            fp_frames.append(_to_uint8_rgb(cam_img[0].cpu().numpy()))
++
++                    if tp_camera is not None:
++                        tp_annotator, tp_translate_op, tp_rotate_op, tp_follow_offset = tp_camera
++                        robot_pos = _extract_robot_pos(obs, env)
++                        if robot_pos is not None:
++                            _update_third_person_camera(tp_translate_op, tp_rotate_op, robot_pos, tp_follow_offset)
++                        tp_frame = _read_third_person_frame(tp_annotator)
++                        if tp_frame is not None:
++                            tp_frames.append(tp_frame)
++
++                if terminated.any() or truncated.any():
++                    print(
++                        f"Resetting policy for terminated env_ids: {terminated.nonzero().flatten()}"
++                        f" and truncated env_ids: {truncated.nonzero().flatten()}"
++                    )
++                    env_ids = (terminated | truncated).nonzero().flatten()
++                    policy.reset(env_ids=env_ids)
++
++        metrics = compute_metrics(env)
++        print(f"Metrics: {metrics}")
++
++        if args_cli.save_video:
++            os.makedirs(args_cli.video_output_dir, exist_ok=True)
++            fp_path = os.path.join(args_cli.video_output_dir, f"{args_cli.video_prefix}_first_person.mp4")
++            _save_frames_to_video(fp_frames, fp_path, fps=args_cli.video_fps)
++
++            if tp_frames:
++                tp_path = os.path.join(args_cli.video_output_dir, f"{args_cli.video_prefix}_third_person.mp4")
++                _save_frames_to_video(tp_frames, tp_path, fps=args_cli.video_fps)
++
++            if fp_frames and tp_frames:
++                from PIL import Image
++
++                min_len = min(len(fp_frames), len(tp_frames))
++                combined = []
++                for i in range(min_len):
++                    fp = fp_frames[i]
++                    tp = tp_frames[i]
++                    if fp.shape[0] != tp.shape[0]:
++                        tp = np.array(Image.fromarray(tp).resize((fp.shape[1], fp.shape[0])))
++                    combined.append(np.concatenate([fp, tp], axis=1))
++                combined_path = os.path.join(args_cli.video_output_dir, f"{args_cli.video_prefix}_combined.mp4")
++                _save_frames_to_video(combined, combined_path, fps=args_cli.video_fps)
++        env.close()
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/isaaclab_arena/examples/policy_runner_with_video.py b/isaaclab_arena/examples/policy_runner_with_video.py
+new file mode 100644
+index 00000000..8c5f3674
+--- /dev/null
++++ b/isaaclab_arena/examples/policy_runner_with_video.py
+@@ -0,0 +1,226 @@
++# Copyright (c) 2025, The Isaac Lab Arena Project Developers.
++# Modified version of policy_runner.py that saves video output.
++# Supports first-person (robot head cam) and third-person (global) views.
++
++import numpy as np
++import os
++import random
++import torch
++import tqdm
++
++from isaaclab_arena.cli.isaaclab_arena_cli import get_isaaclab_arena_cli_parser
++from isaaclab_arena.examples.example_environments.cli import get_arena_builder_from_cli
++from isaaclab_arena.examples.policy_runner_cli import create_policy, setup_policy_argument_parser
++from isaaclab_arena.utils.isaaclab_utils.simulation_app import SimulationAppContext
++
++
++def to_uint8_rgb(frame: np.ndarray) -> np.ndarray:
++    """Convert camera frame to uint8 RGB robustly across float/uint input formats."""
++    arr = np.asarray(frame)
++    if arr.ndim != 3:
++        raise ValueError(f"Expected HxWxC frame, got shape: {arr.shape}")
++    if arr.shape[2] == 4:
++        arr = arr[:, :, :3]
++    if np.issubdtype(arr.dtype, np.floating):
++        max_val = float(np.nanmax(arr)) if arr.size > 0 else 1.0
++        if max_val <= 1.5:
++            arr = arr * 255.0
++        arr = np.clip(arr, 0.0, 255.0).astype(np.uint8)
++    else:
++        arr = np.clip(arr, 0, 255).astype(np.uint8)
++    return arr
++
++
++def save_frames_to_video(frames, video_path, fps=30):
++    """Save a list of numpy frames to an MP4 video."""
++    import av
++
++    if not frames:
++        return
++    container = av.open(video_path, mode="w")
++    h, w = frames[0].shape[:2]
++    stream = container.add_stream("h264", rate=fps)
++    stream.width = w
++    stream.height = h
++    stream.pix_fmt = "yuv420p"
++    stream.options = {"crf": "18", "profile:v": "high"}
++    for frame_data in frames:
++        av_frame = av.VideoFrame.from_ndarray(frame_data, format="rgb24")
++        for packet in stream.encode(av_frame):
++            container.mux(packet)
++    for packet in stream.encode():
++        container.mux(packet)
++    container.close()
++    print(f"Video saved to: {video_path} ({len(frames)} frames)")
++
++
++def create_third_person_camera(width=640, height=480, follow_offset=(2.0, -1.2, 1.4)):
++    """Create a third-person camera that can be updated to follow the robot."""
++    import omni.usd
++    from pxr import Gf, UsdGeom
++
++    stage = omni.usd.get_context().get_stage()
++    cam_path = "/World/ThirdPersonCam"
++
++    # Create camera prim
++    cam_prim = stage.DefinePrim(cam_path, "Camera")
++    cam = UsdGeom.Camera(cam_prim)
++    cam.GetFocalLengthAttr().Set(24.0)
++    cam.GetHorizontalApertureAttr().Set(20.955)
++    cam.GetClippingRangeAttr().Set(Gf.Vec2f(0.1, 20.0))
++
++    # Set camera transform with follow offset.
++    xform = UsdGeom.Xformable(cam_prim)
++    xform.ClearXformOpOrder()
++    translate_op = xform.AddTranslateOp()
++    rotate_op = xform.AddRotateXYZOp()
++    translate_op.Set(Gf.Vec3d(*follow_offset))
++    rotate_op.Set(Gf.Vec3f(-30.0, 0.0, 140.0))
++
++    # Create render product via replicator
++    import omni.replicator.core as rep
++    rp = rep.create.render_product(cam_path, (width, height))
++
++    # Create annotator to read RGB
++    rgb_annot = rep.AnnotatorRegistry.get_annotator("rgb")
++    rgb_annot.attach([rp])
++
++    return rgb_annot, translate_op, rotate_op, np.array(follow_offset, dtype=np.float32)
++
++
++def _extract_robot_pos(obs, env):
++    """Best-effort extraction of robot world position from observations/runtime state."""
++    policy_obs = obs.get("policy") if isinstance(obs, dict) else None
++    if isinstance(policy_obs, dict):
++        robot_pos = policy_obs.get("robot_pos")
++        if robot_pos is not None:
++            return robot_pos[0].detach().cpu().numpy()
++    try:
++        return env.scene["robot"].data.root_pos_w[0].detach().cpu().numpy()
++    except Exception:
++        return None
++
++
++def _update_third_person_camera(translate_op, rotate_op, robot_pos, follow_offset):
++    """Update third-person camera to follow and look at the robot."""
++    from pxr import Gf
++
++    target = np.asarray(robot_pos, dtype=np.float32)[:3]
++    cam_pos = target + follow_offset
++    look = target - cam_pos
++    horiz = float(np.linalg.norm(look[:2])) + 1e-6
++    yaw_deg = float(np.degrees(np.arctan2(look[1], look[0])))
++    pitch_deg = float(-np.degrees(np.arctan2(abs(look[2]), horiz)))
++    translate_op.Set(Gf.Vec3d(float(cam_pos[0]), float(cam_pos[1]), float(cam_pos[2])))
++    rotate_op.Set(Gf.Vec3f(pitch_deg, 0.0, yaw_deg))
++
++
++def read_third_person_frame(rgb_annot):
++    """Read a frame from the third-person camera annotator."""
++    data = rgb_annot.get_data()
++    if data is None or len(data) == 0:
++        return None
++    # data is RGBA (H, W, 4), take RGB
++    frame = np.array(data)
++    return to_uint8_rgb(frame)
++
++
++def main():
++    """Script to run an IsaacLab Arena environment with video saving."""
++    args_parser = get_isaaclab_arena_cli_parser()
++    args_parser.add_argument(
++        "--video_output_dir",
++        type=str,
++        default="/home/ubuntu/DATA2/workspace/xmh/IsaacLab-Arena/output_videos",
++        help="Directory to save output video",
++    )
++    args_parser.add_argument(
++        "--save_third_person",
++        action="store_true",
++        default=False,
++        help="Also save third-person and combined videos (slower in headless mode).",
++    )
++    args_cli, unknown = args_parser.parse_known_args()
++
++    with SimulationAppContext(args_cli):
++        args_parser = setup_policy_argument_parser(args_parser)
++        args_cli = args_parser.parse_args()
++
++        arena_builder = get_arena_builder_from_cli(args_cli)
++        env = arena_builder.make_registered()
++
++        if args_cli.seed is not None:
++            env.seed(args_cli.seed)
++            torch.manual_seed(args_cli.seed)
++            np.random.seed(args_cli.seed)
++            random.seed(args_cli.seed)
++
++        obs, _ = env.reset()
++
++        # Create third-person camera only when explicitly requested.
++        tp_camera = create_third_person_camera() if args_cli.save_third_person else None
++
++        policy, num_steps = create_policy(args_cli)
++        from isaaclab_arena.metrics.metrics import compute_metrics
++
++        # Collect frames
++        fp_frames = []  # first-person
++        tp_frames = []  # third-person
++        for step_i in tqdm.tqdm(range(num_steps)):
++            with torch.inference_mode():
++                actions = policy.get_action(env, obs)
++                obs, _, terminated, truncated, _ = env.step(actions)
++
++                # First-person: from camera_obs
++                if "camera_obs" in obs:
++                    cam_keys = list(obs["camera_obs"].keys())
++                    if cam_keys:
++                        cam_img = obs["camera_obs"][cam_keys[0]]
++                        frame = to_uint8_rgb(cam_img[0].cpu().numpy())
++                        fp_frames.append(frame)
++
++                # Third-person: from replicator annotator
++                if tp_camera is not None:
++                    tp_annotator, tp_translate_op, tp_rotate_op, tp_follow_offset = tp_camera
++                    robot_pos = _extract_robot_pos(obs, env)
++                    if robot_pos is not None:
++                        _update_third_person_camera(tp_translate_op, tp_rotate_op, robot_pos, tp_follow_offset)
++                    tp_frame = read_third_person_frame(tp_annotator)
++                    if tp_frame is not None:
++                        tp_frames.append(tp_frame)
++
++                if terminated.any() or truncated.any():
++                    env_ids = (terminated | truncated).nonzero().flatten()
++                    policy.reset(env_ids=env_ids)
++
++        metrics = compute_metrics(env)
++        print(f"Metrics: {metrics}")
++
++        # Save videos
++        video_dir = args_cli.video_output_dir
++        os.makedirs(video_dir, exist_ok=True)
++
++        if fp_frames:
++            save_frames_to_video(fp_frames, os.path.join(video_dir, "g1_locomanip_first_person.mp4"))
++        if tp_frames:
++            save_frames_to_video(tp_frames, os.path.join(video_dir, "g1_locomanip_third_person.mp4"))
++
++        # Side-by-side video if both have same frame count
++        if fp_frames and tp_frames:
++            min_len = min(len(fp_frames), len(tp_frames))
++            combined = []
++            for i in range(min_len):
++                fp = fp_frames[i]
++                tp = tp_frames[i]
++                # Resize tp to match fp height if needed
++                if fp.shape[0] != tp.shape[0]:
++                    from PIL import Image
++                    tp = np.array(Image.fromarray(tp).resize((fp.shape[1], fp.shape[0])))
++                combined.append(np.concatenate([fp, tp], axis=1))
++            save_frames_to_video(combined, os.path.join(video_dir, "g1_locomanip_combined.mp4"))
++
++        env.close()
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/docs/pages/example_workflows/locomanipulation/g1_wbc_pink_23d_action_parsing.rst b/docs/pages/example_workflows/locomanipulation/g1_wbc_pink_23d_action_parsing.rst
+new file mode 100644
+index 00000000..6e005bba
+--- /dev/null
++++ b/docs/pages/example_workflows/locomanipulation/g1_wbc_pink_23d_action_parsing.rst
+@@ -0,0 +1,118 @@
++G1 WBC+PINK 23D Action Parsing
++==============================
++
++This note explains how the 23-dimensional replay action is parsed by
++``G1DecoupledWBCPinkAction`` and transformed into final 43-DoF joint targets.
++
++Scope
++-----
++
++- Environment: ``galileo_g1_locomanip_pick_and_place``
++- Embodiment: ``g1_wbc_pink``
++- Policy mode: ``replay`` (actions are loaded from HDF5)
++
++Action Layout (23D)
++-------------------
++
++Index mapping is defined in:
++``isaaclab_arena_g1/g1_whole_body_controller/wbc_policy/policy/action_constants.py``.
++
++.. list-table::
++   :widths: 20 20 60
++   :header-rows: 1
++
++   * - Slice
++     - Dim
++     - Meaning
++   * - ``[0]``
++     - 1
++     - ``left_hand_state`` (open/close)
++   * - ``[1]``
++     - 1
++     - ``right_hand_state`` (open/close)
++   * - ``[2:5]``
++     - 3
++     - left wrist position ``xyz``
++   * - ``[5:9]``
++     - 4
++     - left wrist quaternion ``wxyz``
++   * - ``[9:12]``
++     - 3
++     - right wrist position ``xyz``
++   * - ``[12:16]``
++     - 4
++     - right wrist quaternion ``wxyz``
++   * - ``[16:19]``
++     - 3
++     - navigation command ``(vx, vy, wz)``
++   * - ``[19:20]``
++     - 1
++     - base height command
++   * - ``[20:23]``
++     - 3
++     - torso orientation command ``(roll, pitch, yaw)``
++
++Execution Pipeline
++------------------
++
++Main entry is:
++``isaaclab_arena_g1/g1_env/mdp/actions/g1_decoupled_wbc_pink_action.py``.
++
++1. Receive replay action and cache raw action
++^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
++
++``process_actions()`` stores ``self._raw_actions`` and works on a cloned tensor.
++
++2. Upper-body branch (PINK IK)
++^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
++
++- Extract wrist targets and hand states from the 23D vector.
++- Convert quaternion from Isaac format ``wxyz`` to SciPy format ``xyzw``.
++- Build two 4x4 target transforms (left and right wrist).
++- Run PINK IK via ``G1WBCUpperbodyController``:
++
++  - ``G1WBCUpperbodyController.inverse_kinematics(...)``
++  - internally calls ``pink.solve_ik(...)`` in
++    ``g1_wbc_upperbody_controller.py``
++
++- Output of this branch is a full-body ``q`` from IK, then only the upper-body
++  joint subset is kept as ``target_upper_body_joints``.
++
++3. Lower-body branch (WBC)
++^^^^^^^^^^^^^^^^^^^^^^^^^^
++
++- Extract:
++
++  - ``navigate_cmd`` from ``[16:19]``
++  - ``base_height_cmd`` from ``[19:20]``
++  - ``torso_orientation_rpy_cmd`` from ``[20:23]``
++
++- Set these into WBC goal via ``set_wbc_goal(...)``.
++- Build WBC observation from simulator state using ``prepare_observations(...)``.
++- Call ``self.wbc_policy.get_action(target_upper_body_joints)``.
++
++WBC policy is assembled in:
++``isaaclab_arena_g1/g1_whole_body_controller/wbc_policy/policy/wbc_policy_factory.py``.
++
++- Upper-body policy: ``IdentityPolicy`` (pass-through of PINK result)
++- Lower-body policy: ``G1HomiePolicyV2`` (stand/walk ONNX policy)
++- Combined by ``G1DecoupledWholeBodyPolicy``
++
++4. Convert to simulator joint order and apply
++^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
++
++- ``postprocess_actions(...)`` converts WBC output into simulator joint order.
++- Result is ``self._processed_actions`` (43 DoF).
++- ``apply_actions()`` sends it to:
++  ``self._asset.set_joint_position_target(self._processed_actions, self._joint_ids)``.
++
++Replay Data Relation
++--------------------
++
++With ``--policy_type replay``, the HDF5 ``actions`` tensor is loaded by
++``ReplayActionPolicy`` and fed step-by-step into the action term above.
++
++Therefore, replay ``actions (23D)`` are **not** final motor commands.
++They are high-level commands consumed by PINK+WBC and converted into
++``processed_actions (43D)`` before actuation.
++

@@ -1,0 +1,58 @@
+diff --git a/grasp_generation/utils/energy.py b/grasp_generation/utils/energy.py
+index 2fb8566..c3eb87b 100755
+--- a/grasp_generation/utils/energy.py
++++ b/grasp_generation/utils/energy.py
+@@ -57,7 +57,7 @@ def cal_energy(
+         object_model.surface_points_tensor * object_scale
+     )  # (n_objects * batch_size_each, num_samples, 3)
+     distances = hand_model.cal_distance(object_surface_points)
+-    distances[distances <= 0] = 0
++    distances = torch.clamp(distances, min=0)
+     E_pen = distances.sum(-1)
+ 
+     # E_prior
+@@ -67,7 +67,7 @@ def cal_energy(
+         dim=-1,
+     )
+     if correct_initial_pose:
+-        E_prior += (
++        E_prior = E_prior + (
+             torch.norm(
+                 (hand_model.hand_pose[:, :3] - hand_model.initial_translation), dim=-1
+             )
+diff --git a/grasp_generation/utils/hand_model.py b/grasp_generation/utils/hand_model.py
+index 9544bb7..ce96792 100755
+--- a/grasp_generation/utils/hand_model.py
++++ b/grasp_generation/utils/hand_model.py
+@@ -298,8 +298,9 @@ class HandModel:
+ 
+         wrist_pos = self.keypoints[:, 0].detach().clone()
+         true_wrist_pos = hand_pose[:, :3]
+-        self.keypoints += (true_wrist_pos - wrist_pos)[:, None]
+-        self.vertices += (true_wrist_pos - wrist_pos)[:, None]
++        offset = (true_wrist_pos - wrist_pos)[:, None]
++        self.keypoints = self.keypoints + offset
++        self.vertices = self.vertices + offset
+         # print(self.keypoints)
+         # print(self.keypoints.shape)
+         self.contact_point_indices = contact_point_indices
+diff --git a/sample.py b/sample.py
+index 4577e85..230f179 100644
+--- a/sample.py
++++ b/sample.py
+@@ -1963,6 +1963,7 @@ def generate_interaction_motion(
+ 
+     # Stage 4: Run FingerNet.
+     # If the object is not in contact with the hand, use the default rest finger pose.
++    finger_all_res_list = None
+     if add_finger_motion and (left_contact or right_contact):
+         finger_all_res_list = call_grasp_model_long_seq(
+             all_res_list,
+@@ -2400,6 +2401,7 @@ def run_sample(
+         fine_milestone=fine_milestone,
+         navi_milestone=navi_milestone,
+         object_list=opt.test_object_names,
++        VISUALIZE=False,
+     )
+ 
+     torch.cuda.empty_cache()

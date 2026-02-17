@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd /home/ubuntu/DATA2/workspace/xmh/hoifhli_release
-/home/ubuntu/miniconda3/envs/hoifhli_env/bin/bash scripts/sample.sh
+PACK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-find /home/ubuntu/DATA2/workspace/xmh/hoifhli_release/results -name human_object_results.pkl
+HOI_ROOT="$PACK_ROOT/repos/hoifhli_release"
+PYTHON="${HOI_PYTHON:-$(command -v python3)}"
+
+cd "$HOI_ROOT"
+"$PYTHON" sample.py
+
+echo "--- HOI results ---"
+find "$HOI_ROOT/results" -name human_object_results.pkl 2>/dev/null

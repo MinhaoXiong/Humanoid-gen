@@ -1,96 +1,97 @@
 # Humanoid-gen-pack
 
-你当前项目的最小可运行链路（G1 Path A）代码整理包。
+HOIFHLI + G1 replay 最小可运行链路。
 
-目标：
-1. `hoifhli_release` 产出 human-object motion（取 object 轨迹）
-2. `BODex` 产出单手 grasp（pregrasp/grasp）
-3. `build_replay.py` 融合为 G1 `g1_wbc_pink` 23D 回放动作
-4. Isaac 回放并保存视频
+在 IsaacLab 仿真中，将 HOIFHLI 生成的人-物交互轨迹转化为 Unitree G1 机器人的回放动作，并导出视频。
 
-## 目录说明
+## 目录结构
 
-- `bridge/build_replay.py`：HOI + BODex -> G1 replay 动作/物体轨迹
-- `isaac_replay/policy_runner_kinematic_object_replay.py`：Isaac 回放（含视频导出）
-- `scripts/01_hoi_sample.sh`：HOI 采样和结果定位
-- `scripts/02_bodex_grasp.sh`：BODex grasp 生成
-- `scripts/03_build_replay.sh`：构建回放文件
-- `scripts/04_isaac_replay_video.sh`：回放并导出视频
-- `docs/`：桥接流程与状态说明（中文）
-- `notes/BODex_cpp14_fix.md`：BODex 编译修复记录
-
-## 源码整理（你要求的 source code）
-
-关键源码已集中在 `source/`，按原仓库分组：
-
-- `source/hoifhli_release/sample.py`
-- `source/hoifhli_release/scripts/sample.sh`
-- `source/BODex/example_grasp/plan_batch_env.py`
-- `source/BODex/example_grasp/plan_mogen_batch.py`
-- `source/BODex/src/curobo/wrap/reacher/grasp_solver.py`
-- `source/BODex/src/curobo/wrap/reacher/types.py`
-- `source/BODex/src/curobo/util_file.py`
-- `source/BODex/src/curobo/content/configs/manip/sim_shadow/fc.yml`
-- `source/BODex/src/curobo/geom/cpp/setup.py`
-- `source/IsaacLab-Arena/tools/hoi_bodex_g1_bridge/build_replay.py`
-- `source/IsaacLab-Arena/isaaclab_arena/examples/policy_runner_kinematic_object_replay.py`
-
-## 环境
-
-- HOI：`hoifhli_env`
-- BODex：`objdex`
-- Isaac：`isaaclab_arena`
-
-## 一次完整执行
-
-### 1) HOI 生成
-
-```bash
-cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
-bash scripts/01_hoi_sample.sh
+```
+├── bridge/build_replay.py              HOI → G1 23D 回放动作
+├── isaac_replay/                       Isaac 回放脚本
+├── scripts/
+│   ├── 01_hoi_sample.sh                HOI 采样
+│   ├── 03_build_replay.sh              构建回放文件
+│   └── 04_isaac_replay_video.sh        回放 + 视频导出
+├── repos/
+│   ├── hoifhli_release/                [submodule] HOI 生成模型
+│   └── IsaacLab-Arena/                 [submodule] Isaac 仿真平台
+├── patches/                            上游仓库的本地修改
+├── envs/                               Conda 环境配置
+├── data/download_data.sh               数据下载脚本（需填入地址）
+├── docs/                               详细文档
+└── setup_all.sh                        一键初始化
 ```
 
-得到 `human_object_results.pkl` 后，记住它的绝对路径。
+## 快速开始
 
-### 2) BODex 生成 grasp
-
-```bash
-cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
-bash scripts/02_bodex_grasp.sh
-```
-
-得到 `grasp.npy` 后，记住它的绝对路径。
-
-### 3) 构建回放
+### 1. Clone
 
 ```bash
-cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
-bash scripts/03_build_replay.sh \
-  /abs/path/to/human_object_results.pkl \
-  /abs/path/to/grasp.npy \
-  /tmp/g1_bridge_run1
+git clone --recursive https://github.com/MinhaoXiong/Humanoid-gen.git
+cd Humanoid-gen
 ```
 
-输出：
-- `/tmp/g1_bridge_run1/replay_actions.hdf5`
-- `/tmp/g1_bridge_run1/object_kinematic_traj.npz`
-- `/tmp/g1_bridge_run1/bridge_debug.json`
-
-### 4) Isaac 回放 + 视频
+### 2. 初始化
 
 ```bash
-cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
-bash scripts/04_isaac_replay_video.sh /tmp/g1_bridge_run1 g1_bridge_run1
+bash setup_all.sh
 ```
 
-默认视频目录：
-- `/home/ubuntu/DATA2/workspace/xmh/IsaacLab-Arena/.workflow_data/videos`
+这会：初始化 submodule → apply patch → 提示创建 conda 环境和下载数据。
 
-## 你当前反馈的问题（右手飞出视角）
+### 3. 创建环境
 
-当前 Path A 是“腕目标 + 手开合”，容易在某些帧产生腕部不可达目标。建议按顺序处理：
+```bash
+# HOIFHLI 环境
+conda env create -f envs/hoifhli_env.yml
 
-1. 在 `bridge/build_replay.py` 增加腕目标相对躯干的可达域裁剪（半径/高度限幅）
-2. 增大 pregrasp 偏置、减小 approach 位移
-3. 放慢接近和闭合时序（减小速度尖峰）
-4. 再升级到 `G1 + InspireHand` 做手指级抓型约束
+# IsaacLab-Arena 环境（需要 Isaac Sim）
+bash envs/setup_isaaclab_arena.sh
+```
+
+### 4. 下载数据
+
+编辑 `data/download_data.sh` 填入下载地址后运行，或手动将数据放到 `repos/hoifhli_release/` 下：
+- `experiments/` (~380M, 模型权重)
+- `data/processed_data/` (~37G)
+- `data/smpl_all_models/` (~1.9G)
+
+### 5. 执行
+
+```bash
+# Step 1: HOI 生成
+HOI_PYTHON=/path/to/hoifhli_env/bin/python bash scripts/01_hoi_sample.sh
+
+# Step 2: 构建 G1 回放
+ISAAC_PYTHON=/path/to/isaaclab_arena/bin/python \
+  bash scripts/03_build_replay.sh /path/to/human_object_results.pkl /tmp/run1
+
+# Step 3: Isaac 回放 + 视频
+ISAAC_PYTHON=/path/to/isaaclab_arena/bin/python \
+  bash scripts/04_isaac_replay_video.sh /tmp/run1
+```
+
+视频输出到 `output/videos/`。
+
+## Pipeline
+
+```
+HOIFHLI (文本 → 人物交互轨迹)
+    ↓ human_object_results.pkl (obj_pos, obj_rot_mat)
+build_replay.py (物体轨迹 → G1 23D action)
+    ↓ replay_actions.hdf5 + object_kinematic_traj.npz
+IsaacLab-Arena (运动学回放 + 视频)
+```
+
+## 环境变量
+
+脚本通过环境变量指定 Python 解释器：
+- `HOI_PYTHON`：HOIFHLI 环境的 python（默认 `python3`）
+- `ISAAC_PYTHON`：IsaacLab-Arena 环境的 python（默认 `python3`）
+
+## 文档
+
+- `docs/END_TO_END_FROM_HOI_BODEX_CN.md` — 端到端流程说明
+- `docs/PROJECT_STATUS_CN.md` — 项目状态
+- `docs/README_bridge.md` — bridge 脚本详解

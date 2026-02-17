@@ -1,0 +1,75 @@
+diff --git a/docs/pages/example_workflows/locomanipulation/index.rst b/docs/pages/example_workflows/locomanipulation/index.rst
+index 08e18254..f956cba2 100644
+--- a/docs/pages/example_workflows/locomanipulation/index.rst
++++ b/docs/pages/example_workflows/locomanipulation/index.rst
+@@ -93,6 +93,7 @@ Follow the following steps to complete the workflow:
+ - :doc:`step_2_data_generation`
+ - :doc:`step_3_policy_training`
+ - :doc:`step_4_evaluation`
++- :doc:`g1_wbc_pink_23d_action_parsing`
+ 
+ 
+ .. toctree::
+@@ -103,3 +104,4 @@ Follow the following steps to complete the workflow:
+    step_2_data_generation
+    step_3_policy_training
+    step_4_evaluation
++   g1_wbc_pink_23d_action_parsing
+diff --git a/isaaclab_arena/examples/policy_runner_cli.py b/isaaclab_arena/examples/policy_runner_cli.py
+index 9103929d..e0a0511a 100644
+--- a/isaaclab_arena/examples/policy_runner_cli.py
++++ b/isaaclab_arena/examples/policy_runner_cli.py
+@@ -115,7 +115,11 @@ def setup_policy_argument_parser(args_parser: argparse.ArgumentParser | None = N
+ def create_policy(args: argparse.Namespace) -> tuple[PolicyBase, int]:
+     """Create the appropriate policy based on the arguments and return (policy, num_steps)."""
+     if args.policy_type == "replay":
+-        policy = ReplayActionPolicy(args.replay_file_path, args.episode_name)
++        policy = ReplayActionPolicy(
++            replay_file_path=args.replay_file_path,
++            device=args.device,
++            episode_name=args.episode_name,
++        )
+         num_steps = len(policy)
+     elif args.policy_type == "zero_action":
+         policy = ZeroActionPolicy()
+diff --git a/isaaclab_arena_g1/g1_whole_body_controller/wbc_policy/g1_wbc_upperbody_ik/g1_wbc_upperbody_controller.py b/isaaclab_arena_g1/g1_whole_body_controller/wbc_policy/g1_wbc_upperbody_ik/g1_wbc_upperbody_controller.py
+index 109c223e..1ce73642 100644
+--- a/isaaclab_arena_g1/g1_whole_body_controller/wbc_policy/g1_wbc_upperbody_ik/g1_wbc_upperbody_controller.py
++++ b/isaaclab_arena_g1/g1_whole_body_controller/wbc_policy/g1_wbc_upperbody_ik/g1_wbc_upperbody_controller.py
+@@ -89,6 +89,27 @@ class G1BodyIKSolver:
+         self.posture_cost = ik_solver_settings.posture_cost
+         self.posture_lm_damping = ik_solver_settings.posture_lm_damping
+         self.robot = None
++        self.qp_solver = self._select_qp_solver()
++
++    @staticmethod
++    def _select_qp_solver() -> str:
++        """Select an available QP backend for Pink IK."""
++        try:
++            import qpsolvers
++
++            available = set(qpsolvers.available_solvers)
++        except Exception:
++            # Keep historical default if solver discovery fails.
++            return "osqp"
++
++        if "quadprog" in available:
++            return "quadprog"
++        if "osqp" in available:
++            return "osqp"
++        raise RuntimeError(
++            f"No supported QP solver found for Pink IK. Available: {sorted(available)}. "
++            "Expected one of: osqp, quadprog."
++        )
+ 
+     def register_robot(self, robot):
+         self.robot = robot
+@@ -175,7 +196,7 @@ class G1BodyIKSolver:
+                 self.configuration,
+                 self.tasks.values(),
+                 dt=self.dt,
+-                solver="osqp",
++                solver=self.qp_solver,
+             )
+             self.configuration.q = self.robot.clip_configuration(
+                 self.configuration.q + velocity * self.dt * self.amplify_factor
