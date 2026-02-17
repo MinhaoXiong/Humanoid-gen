@@ -17,3 +17,8 @@ output/
 
 # 数据目录（通过 download_data.sh 获取）
 data/downloaded/
+
+# 允许同步 artifacts 下的中间和结果文件
+!artifacts/**/*.pkl
+!artifacts/**/*.hdf5
+!artifacts/**/*.npz
