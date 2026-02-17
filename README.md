@@ -181,36 +181,52 @@ HOIFHLI 上游仓库默认开启可视化（`VISUALIZE=True`），采样时自�
 repos/hoifhli_release/visualizer_results/<vis_wdir>/
 ```
 
-### 2. Isaac 物体 motion 单独可视化
+### 2. Isaac 回放（直接使用 HOIFHLI 对象）
 
-在 Isaac 回放时加 `--object-only` 参数，机器人站着不动，只回放物体轨迹。
+使用 `--use-hoi-object` 后，会从 `--kin-traj-path` 的 `object_name` 自动解析 HOIFHLI 对象并加载，不再固定 `brown_box`。
 
-**Headless 模式（无显示器 / 远程服务器）**— 保存视频文件：
-
-```bash
-ISAAC_PYTHON=/path/to/isaaclab_arena/bin/python \
-  bash scripts/05_object_only_replay.sh /tmp/run1
-```
-
-视频输出到 `output/videos/`。
-
-**GUI 模式（有显示器）**— 实时在线观看：
-
-去掉 `--headless` 参数即可打开 Isaac Sim GUI 窗口，实时观看物体运动：
+#### Headless（保存视频）
 
 ```bash
-ISAAC_PYTHON=/path/to/isaaclab_arena/bin/python \
-  python repos/IsaacLab-Arena/isaaclab_arena/examples/policy_runner_kinematic_object_replay.py \
-  --device cuda:0 --enable_cameras \
-  --object-only \
-  --kin-traj-path /tmp/run1/object_kinematic_traj.npz \
-  --kin-asset-name brown_box \
+cd /home/ubuntu/DATA2/workspace/xmh/IsaacLab-Arena
+/home/ubuntu/miniconda3/envs/isaaclab_arena/bin/python isaaclab_arena/examples/policy_runner_kinematic_object_replay.py \
+  --headless --device cpu --enable_cameras \
+  --policy_type replay \
+  --replay_file_path /tmp/g1_bridge_run2/replay_actions.hdf5 \
+  --episode_name demo_0 \
+  --kin-traj-path /tmp/g1_bridge_run2/object_kinematic_traj.npz \
   --kin-apply-timing pre_step \
+  --use-hoi-object \
+  --hoi-root /home/ubuntu/DATA2/workspace/xmh/hoifhli_release \
+  --max-steps 408 \
+  --save-video \
+  --video-output-dir /home/ubuntu/DATA2/workspace/xmh/IsaacLab-Arena/.workflow_data/videos \
+  --video-prefix g1_bridge_hoi_obj \
   galileo_g1_locomanip_pick_and_place \
-  --object brown_box --embodiment g1_wbc_pink
+  --embodiment g1_wbc_pink
 ```
 
-也可以同时加 `--save-video` 在 GUI 观看的同时保存视频。
+#### 非 Headless（开 GUI）
+
+```bash
+cd /home/ubuntu/DATA2/workspace/xmh/IsaacLab-Arena
+/home/ubuntu/miniconda3/envs/isaaclab_arena/bin/python isaaclab_arena/examples/policy_runner_kinematic_object_replay.py \
+  --device cuda:0 --enable_cameras \
+  --policy_type replay \
+  --replay_file_path /tmp/g1_bridge_run2/replay_actions.hdf5 \
+  --episode_name demo_0 \
+  --kin-traj-path /tmp/g1_bridge_run2/object_kinematic_traj.npz \
+  --kin-apply-timing pre_step \
+  --use-hoi-object \
+  --hoi-root /home/ubuntu/DATA2/workspace/xmh/hoifhli_release \
+  --max-steps 408 \
+  galileo_g1_locomanip_pick_and_place \
+  --embodiment g1_wbc_pink
+```
+
+说明：
+- `--device cpu` 不是必须，`cuda:0` 可以用，通常更快。
+- 你当前机器多卡 + IOMMU 会出现一些 GPU/P2P 警告，通常不影响运行；若遇到不稳定，先用 `cpu` 是最稳妥选项。
 
 ## 环境变量
 
