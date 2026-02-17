@@ -223,3 +223,4 @@ ISAAC_PYTHON=/path/to/isaaclab_arena/bin/python \
 - `docs/END_TO_END_FROM_HOI_BODEX_CN.md` — 端到端流程说明
 - `docs/PROJECT_STATUS_CN.md` — 项目状态
 - `docs/README_bridge.md` — bridge 脚本详解
+- `docs/CUROBO_G1_MOTION_PLANNING_CN.md` — G1 适配 CuRobo 运动规划方案
