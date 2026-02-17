@@ -30,8 +30,8 @@ def _setup_policy_argument_parser_without_parse(args_parser):
         "--policy_type",
         type=str,
         choices=["zero_action", "replay", "replay_lerobot", "gr00t_closedloop"],
-        required=True,
-        help="Type of policy to use.",
+        default="zero_action",
+        help="Type of policy to use. Ignored when --object-only is set.",
     )
     add_zero_action_arguments(args_parser)
     add_replay_arguments(args_parser)
@@ -76,6 +76,11 @@ def _add_object_replay_args(parser):
         type=int,
         default=None,
         help="Optional cap on simulation steps. By default, replay policy length is used.",
+    )
+    parser.add_argument(
+        "--object-only",
+        action="store_true",
+        help="Only replay object motion. Robot sends zero actions and stands still.",
     )
 
 
@@ -275,12 +280,14 @@ def main():
         _add_object_replay_args(args_parser)
         _add_video_args(args_parser)
         args_cli = args_parser.parse_args()
-        if args_cli.policy_type == "replay" and args_cli.replay_file_path is None:
-            raise ValueError("--replay_file_path is required when using --policy_type replay")
-        if args_cli.policy_type == "replay_lerobot" and args_cli.config_yaml_path is None:
-            raise ValueError("--config_yaml_path is required when using --policy_type replay_lerobot")
-        if args_cli.policy_type == "gr00t_closedloop" and args_cli.policy_config_yaml_path is None:
-            raise ValueError("--policy_config_yaml_path is required when using --policy_type gr00t_closedloop")
+        object_only = getattr(args_cli, "object_only", False)
+        if not object_only:
+            if args_cli.policy_type == "replay" and args_cli.replay_file_path is None:
+                raise ValueError("--replay_file_path is required when using --policy_type replay")
+            if args_cli.policy_type == "replay_lerobot" and args_cli.config_yaml_path is None:
+                raise ValueError("--config_yaml_path is required when using --policy_type replay_lerobot")
+            if args_cli.policy_type == "gr00t_closedloop" and args_cli.policy_config_yaml_path is None:
+                raise ValueError("--policy_config_yaml_path is required when using --policy_type gr00t_closedloop")
 
         arena_builder = get_arena_builder_from_cli(args_cli)
         env = arena_builder.make_registered()
@@ -292,12 +299,21 @@ def main():
             random.seed(args_cli.seed)
 
         obs, _ = env.reset()
-        policy, policy_steps = create_policy(args_cli)
+        if object_only:
+            policy = None
+            policy_steps = 0
+        else:
+            policy, policy_steps = create_policy(args_cli)
         tp_camera = _create_third_person_camera() if (args_cli.save_video and args_cli.save_third_person) else None
         fp_frames = []
         tp_frames = []
 
-        step_budget = policy_steps if args_cli.max_steps is None else min(policy_steps, args_cli.max_steps)
+        if object_only:
+            step_budget = object_replayer.length
+            if args_cli.max_steps is not None:
+                step_budget = min(step_budget, args_cli.max_steps)
+        else:
+            step_budget = policy_steps if args_cli.max_steps is None else min(policy_steps, args_cli.max_steps)
         object_replayer = ObjectKinematicReplayer(
             object_traj_path=args_cli.kin_traj_path,
             object_asset_name=args_cli.kin_asset_name,
@@ -314,10 +330,14 @@ def main():
                 if args_cli.kin_apply_timing == "pre_step":
                     object_replayer.apply(env, step)
 
-                actions = policy.get_action(env, obs)
-                if actions is None:
-                    print(f"Policy returned None at step {step}, stopping replay.")
-                    break
+                if object_only:
+                    action_dim = env.action_space.shape[-1] if hasattr(env, "action_space") else 23
+                    actions = torch.zeros((env.num_envs, action_dim), device=env.device)
+                else:
+                    actions = policy.get_action(env, obs)
+                    if actions is None:
+                        print(f"Policy returned None at step {step}, stopping replay.")
+                        break
                 obs, _, terminated, truncated, _ = env.step(actions)
 
                 if args_cli.kin_apply_timing == "post_step":
@@ -345,7 +365,8 @@ def main():
                         f" and truncated env_ids: {truncated.nonzero().flatten()}"
                     )
                     env_ids = (terminated | truncated).nonzero().flatten()
-                    policy.reset(env_ids=env_ids)
+                    if policy is not None:
+                        policy.reset(env_ids=env_ids)
 
         metrics = compute_metrics(env)
         print(f"Metrics: {metrics}")

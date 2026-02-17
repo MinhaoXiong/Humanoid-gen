@@ -170,6 +170,40 @@ HOIFHLI 输出的 `human_object_results.pkl` 包含人体全身运动和物体�
 - `object_kinematic_traj.npz` — 物体轨迹（Isaac 回放时强制写入物体位姿，不走物理引擎）
 - `bridge_debug.json` — 参数、阶段划分、sanity check
 
+## 可视化
+
+### 1. HOIFHLI 人体+物体 motion 可视化
+
+HOIFHLI 采样时自动生成人体+物体交互的渲染视频（pyrender → PNG → MP4）。patch apply 后 `VISUALIZE=True` 已开启。
+
+运行 `scripts/01_hoi_sample.sh` 后，视频输出到：
+```
+repos/hoifhli_release/visualizer_results/<vis_wdir>/
+```
+
+### 2. Isaac 物体 motion 单独可视化
+
+在 Isaac 回放时加 `--object-only` 参数，机器人站着不动，只回放物体轨迹：
+
+```bash
+ISAAC_PYTHON=/path/to/isaaclab_arena/bin/python \
+  bash scripts/05_object_only_replay.sh /tmp/run1
+```
+
+或手动调用：
+```bash
+python policy_runner_kinematic_object_replay.py \
+  --headless --device cpu --enable_cameras \
+  --object-only \
+  --kin-traj-path /tmp/run1/object_kinematic_traj.npz \
+  --kin-asset-name brown_box \
+  --save-video --save-third-person \
+  galileo_g1_locomanip_pick_and_place \
+  --object brown_box --embodiment g1_wbc_pink
+```
+
+视频输出到 `output/videos/`。
+
 ## 环境变量
 
 脚本通过环境变量指定 Python 解释器：

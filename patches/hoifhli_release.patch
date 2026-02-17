@@ -52,7 +52,7 @@ index 4577e85..230f179 100644
          fine_milestone=fine_milestone,
          navi_milestone=navi_milestone,
          object_list=opt.test_object_names,
-+        VISUALIZE=False,
++        VISUALIZE=True,
      )
  
      torch.cuda.empty_cache()
