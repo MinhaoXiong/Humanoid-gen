@@ -224,3 +224,20 @@ ISAAC_PYTHON=/path/to/isaaclab_arena/bin/python \
 - `docs/PROJECT_STATUS_CN.md` — 项目状态
 - `docs/README_bridge.md` — bridge 脚本详解
 - `docs/CUROBO_G1_MOTION_PLANNING_CN.md` — G1 适配 CuRobo 运动规划方案
+
+## 已同步产物（artifacts）
+
+当前仓库已同步中间和结果文件到 `artifacts/`：
+
+- `artifacts/g1_bridge_run1/`
+- `artifacts/g1_bridge_run2/`
+- `artifacts/hoifhli/`
+- `artifacts/videos/`
+- `artifacts/MANIFEST.txt`
+
+其中包含你提到的：
+
+- `object_kinematic_traj.npz`
+- `replay_actions.hdf5`（motion 回放文件）
+- `human_object_results.pkl`
+- 回放视频 `*.mp4`

@@ -1,0 +1,92 @@
+{
+  "inputs": {
+    "hoi_pickle": "/home/ubuntu/DATA2/workspace/xmh/hoifhli_release/results/interaction/compare_fine_01/10_long_seq_w_waypoints_pidx_0_oidx_3_interaction_guidance/objs_step_10_bs_idx_0_vis_no_scene/human_object_results.pkl",
+    "bodex_grasp_npy": null,
+    "hoi_fps": 30.0,
+    "target_fps": 50.0
+  },
+  "outputs": {
+    "hdf5": "/tmp/g1_bridge_run1/replay_actions.hdf5",
+    "object_traj": "/tmp/g1_bridge_run1/object_kinematic_traj.npz",
+    "episode_name": "demo_0"
+  },
+  "object_name": "smallbox",
+  "length": {
+    "src_frames": 245,
+    "dst_frames": 408,
+    "duration_sec": 8.14
+  },
+  "stages": {
+    "navigation": {
+      "start": 0,
+      "end": 244
+    },
+    "pregrasp": {
+      "start": 245,
+      "end": 245
+    },
+    "approach": {
+      "start": 245,
+      "end": 285
+    },
+    "grasp_close": {
+      "start": 285,
+      "end": 294
+    },
+    "grasp_hold": {
+      "start": 295,
+      "end": 324
+    }
+  },
+  "relative_hand_pose": {
+    "source": "manual",
+    "pregrasp_pos_obj": [
+      -0.35,
+      -0.08,
+      0.1
+    ],
+    "pregrasp_quat_obj_wxyz": [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "grasp_pos_obj": [
+      -0.28,
+      -0.05,
+      0.06
+    ],
+    "grasp_quat_obj_wxyz": [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "meta": {}
+  },
+  "sanity": {
+    "nav_cmd_abs_max": [
+      0.4000000059604645,
+      0.4000000059604645,
+      0.4000000059604645
+    ],
+    "right_wrist_pos_range": {
+      "min": [
+        0.1863489763885908,
+        -0.08866332176959048,
+        0.13999997586324497
+      ],
+      "max": [
+        0.27000000023480886,
+        -0.04777048689871378,
+        0.91605100103796
+      ]
+    },
+    "right_wrist_quat_first": [
+      1.0,
+      3.492460328742905e-10,
+      -1.6884395395165685e-10,
+      2.6603218931120828e-17
+    ]
+  }
+}
