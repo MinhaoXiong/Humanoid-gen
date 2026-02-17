@@ -188,20 +188,23 @@ repos/hoifhli_release/visualizer_results/<vis_wdir>/
 #### Headless（保存视频）
 
 ```bash
-cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/repos/IsaacLab-Arena
-/home/ubuntu/miniconda3/envs/isaaclab_arena/bin/python isaaclab_arena/examples/policy_runner_kinematic_object_replay.py \
+PACK_ROOT=/path/to/Humanoid-gen-pack
+ISAAC_PYTHON=/path/to/isaaclab_arena/bin/python
+
+cd "$PACK_ROOT/repos/IsaacLab-Arena"
+"$ISAAC_PYTHON" isaaclab_arena/examples/policy_runner_kinematic_object_replay.py \
   --headless --device cpu --enable_cameras \
   --policy_type replay \
-  --replay_file_path /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/artifacts/g1_bridge_run2/replay_actions.hdf5 \
+  --replay_file_path "$PACK_ROOT/artifacts/g1_bridge_run2/replay_actions.hdf5" \
   --episode_name demo_0 \
-  --kin-traj-path /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/artifacts/g1_bridge_run2/object_kinematic_traj.npz \
+  --kin-traj-path "$PACK_ROOT/artifacts/g1_bridge_run2/object_kinematic_traj.npz" \
   --kin-apply-timing pre_step \
   --use-hoi-object \
-  --hoi-root /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/repos/hoifhli_release \
-  --hoi-usd-cache-dir /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/artifacts/hoi_runtime_usd \
+  --hoi-root "$PACK_ROOT/repos/hoifhli_release" \
+  --hoi-usd-cache-dir "$PACK_ROOT/artifacts/hoi_runtime_usd" \
   --max-steps 408 \
   --save-video \
-  --video-output-dir /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/artifacts/videos \
+  --video-output-dir "$PACK_ROOT/artifacts/videos" \
   --video-prefix g1_bridge_hoi_obj \
   galileo_g1_locomanip_pick_and_place \
   --embodiment g1_wbc_pink
@@ -210,17 +213,21 @@ cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/repos/IsaacLab-Arena
 #### 非 Headless（开 GUI）
 
 ```bash
-cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/repos/IsaacLab-Arena
-/home/ubuntu/miniconda3/envs/isaaclab_arena/bin/python isaaclab_arena/examples/policy_runner_kinematic_object_replay.py \
-  --device cuda:0 --enable_cameras \
+PACK_ROOT=/path/to/Humanoid-gen-pack
+ISAAC_PYTHON=/path/to/isaaclab_arena/bin/python
+DEVICE=cuda:0
+
+cd "$PACK_ROOT/repos/IsaacLab-Arena"
+"$ISAAC_PYTHON" isaaclab_arena/examples/policy_runner_kinematic_object_replay.py \
+  --device "$DEVICE" --enable_cameras \
   --policy_type replay \
-  --replay_file_path /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/artifacts/g1_bridge_run2/replay_actions.hdf5 \
+  --replay_file_path "$PACK_ROOT/artifacts/g1_bridge_run2/replay_actions.hdf5" \
   --episode_name demo_0 \
-  --kin-traj-path /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/artifacts/g1_bridge_run2/object_kinematic_traj.npz \
+  --kin-traj-path "$PACK_ROOT/artifacts/g1_bridge_run2/object_kinematic_traj.npz" \
   --kin-apply-timing pre_step \
   --use-hoi-object \
-  --hoi-root /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/repos/hoifhli_release \
-  --hoi-usd-cache-dir /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/artifacts/hoi_runtime_usd \
+  --hoi-root "$PACK_ROOT/repos/hoifhli_release" \
+  --hoi-usd-cache-dir "$PACK_ROOT/artifacts/hoi_runtime_usd" \
   --max-steps 408 \
   galileo_g1_locomanip_pick_and_place \
   --embodiment g1_wbc_pink
