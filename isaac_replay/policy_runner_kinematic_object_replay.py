@@ -6,6 +6,7 @@ from __future__ import annotations
 import numpy as np
 import os
 import random
+import re
 import torch
 import tqdm
 
@@ -81,6 +82,35 @@ def _add_object_replay_args(parser):
         "--object-only",
         action="store_true",
         help="Only replay object motion. Robot sends zero actions and stands still.",
+    )
+    parser.add_argument(
+        "--use-hoi-object",
+        action="store_true",
+        help="Use HOIFHLI object mesh corresponding to trajectory object_name instead of pre-registered assets.",
+    )
+    parser.add_argument(
+        "--hoi-root",
+        type=str,
+        default="/home/ubuntu/DATA2/workspace/xmh/hoifhli_release",
+        help="Root path of hoifhli_release.",
+    )
+    parser.add_argument(
+        "--hoi-runtime-asset-name",
+        type=str,
+        default=None,
+        help="Optional runtime asset name. Default uses object_name from trajectory.",
+    )
+    parser.add_argument(
+        "--hoi-object-scale",
+        type=str,
+        default="1.0,1.0,1.0",
+        help="Runtime HOI object scale as sx,sy,sz.",
+    )
+    parser.add_argument(
+        "--hoi-usd-cache-dir",
+        type=str,
+        default="/tmp/hoi_runtime_usd",
+        help="Directory used to cache converted runtime USD meshes.",
     )
 
 
@@ -213,6 +243,140 @@ def _read_third_person_frame(rgb_annot):
     return _to_uint8_rgb(np.array(data))
 
 
+def _read_object_name_from_traj_npz(kin_traj_path: str) -> str:
+    data = np.load(kin_traj_path, allow_pickle=True)
+    if "object_name" not in data:
+        raise KeyError(f"{kin_traj_path} does not contain key `object_name`.")
+    raw_name = data["object_name"]
+    if isinstance(raw_name, np.ndarray):
+        if raw_name.shape == ():
+            raw_name = raw_name.item()
+        elif raw_name.size > 0:
+            raw_name = raw_name.reshape(-1)[0]
+    name = str(raw_name).strip()
+    if not name:
+        raise ValueError(f"Empty object_name in {kin_traj_path}.")
+    return name
+
+
+def _parse_scale_csv(text: str) -> tuple[float, float, float]:
+    values = [float(x.strip()) for x in text.split(",")]
+    if len(values) != 3:
+        raise ValueError(f"--hoi-object-scale must have 3 values, got: {text}")
+    return float(values[0]), float(values[1]), float(values[2])
+
+
+def _sanitize_asset_name(name: str) -> str:
+    safe = re.sub(r"[^0-9a-zA-Z_]", "_", name)
+    if not safe:
+        safe = "hoi_object"
+    if safe[0].isdigit():
+        safe = f"obj_{safe}"
+    return safe
+
+
+def _resolve_hoi_mesh_path(hoi_root: str, object_name: str, cache_dir: str) -> str:
+    candidates = [
+        os.path.join(hoi_root, "grasp_generation", "objects", f"{object_name}.obj"),
+        os.path.join(hoi_root, "data", "processed_data", "captured_objects", f"{object_name}.obj"),
+        os.path.join(hoi_root, "data", "processed_data", "rest_object_geo", f"{object_name}.obj"),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+
+    rest_ply = os.path.join(hoi_root, "data", "processed_data", "rest_object_geo", f"{object_name}.ply")
+    if os.path.exists(rest_ply):
+        import trimesh
+
+        os.makedirs(cache_dir, exist_ok=True)
+        out_obj = os.path.join(cache_dir, f"{object_name}.obj")
+        mesh = trimesh.load(rest_ply, force="mesh")
+        mesh.export(out_obj)
+        return out_obj
+
+    raise FileNotFoundError(
+        f"Cannot find mesh for HOI object `{object_name}` under {hoi_root}. "
+        "Expected .obj in grasp_generation/objects or processed_data/captured_objects, "
+        "or .ply in processed_data/rest_object_geo."
+    )
+
+
+def _convert_mesh_to_runtime_usd(
+    mesh_path: str,
+    usd_cache_dir: str,
+    asset_name: str,
+    scale: tuple[float, float, float],
+) -> str:
+    from isaaclab.sim.converters import MeshConverter, MeshConverterCfg
+    from isaaclab.sim.schemas import schemas_cfg
+
+    os.makedirs(usd_cache_dir, exist_ok=True)
+    cfg = MeshConverterCfg(
+        asset_path=os.path.abspath(mesh_path),
+        force_usd_conversion=True,
+        usd_dir=os.path.abspath(usd_cache_dir),
+        usd_file_name=f"{asset_name}.usd",
+        make_instanceable=True,
+        collision_props=schemas_cfg.CollisionPropertiesCfg(collision_enabled=True),
+        mesh_collision_props=schemas_cfg.ConvexHullPropertiesCfg(),
+        rigid_props=schemas_cfg.RigidBodyPropertiesCfg(),
+        mass_props=schemas_cfg.MassPropertiesCfg(mass=0.5),
+        scale=scale,
+    )
+    converter = MeshConverter(cfg)
+    return converter.usd_path
+
+
+def _register_runtime_object_asset(asset_name: str, usd_path: str, scale: tuple[float, float, float]) -> None:
+    from isaaclab_arena.assets.asset_registry import AssetRegistry
+    from isaaclab_arena.assets.object import Object
+
+    registry = AssetRegistry()
+    if registry.is_registered(asset_name):
+        return
+
+    def _init(self, prim_path=None, initial_pose=None):
+        Object.__init__(
+            self,
+            name=asset_name,
+            prim_path=prim_path,
+            tags=["object"],
+            usd_path=usd_path,
+            scale=scale,
+            initial_pose=initial_pose,
+        )
+
+    runtime_cls = type(
+        f"RuntimeHoiObject_{asset_name}",
+        (Object,),
+        {
+            "name": asset_name,
+            "tags": ["object"],
+            "usd_path": usd_path,
+            "scale": scale,
+            "__init__": _init,
+        },
+    )
+    registry.register(runtime_cls)
+
+
+def _prepare_runtime_hoi_object_asset(
+    kin_traj_path: str,
+    hoi_root: str,
+    runtime_asset_name: str | None,
+    object_scale: tuple[float, float, float],
+    usd_cache_dir: str,
+) -> tuple[str, str, str]:
+    traj_object_name = _read_object_name_from_traj_npz(kin_traj_path)
+    asset_name = _sanitize_asset_name(runtime_asset_name or traj_object_name)
+    mesh_cache_dir = os.path.join(usd_cache_dir, "mesh_cache")
+    mesh_path = _resolve_hoi_mesh_path(hoi_root, traj_object_name, mesh_cache_dir)
+    usd_path = _convert_mesh_to_runtime_usd(mesh_path, usd_cache_dir, asset_name, object_scale)
+    _register_runtime_object_asset(asset_name, usd_path, object_scale)
+    return traj_object_name, asset_name, usd_path
+
+
 class ObjectKinematicReplayer:
     def __init__(
         self,
@@ -280,6 +444,22 @@ def main():
         _add_object_replay_args(args_parser)
         _add_video_args(args_parser)
         args_cli = args_parser.parse_args()
+        if args_cli.use_hoi_object:
+            object_scale = _parse_scale_csv(args_cli.hoi_object_scale)
+            traj_object_name, runtime_asset_name, runtime_usd = _prepare_runtime_hoi_object_asset(
+                kin_traj_path=args_cli.kin_traj_path,
+                hoi_root=args_cli.hoi_root,
+                runtime_asset_name=args_cli.hoi_runtime_asset_name,
+                object_scale=object_scale,
+                usd_cache_dir=args_cli.hoi_usd_cache_dir,
+            )
+            # Ensure env scene object and kinematic overwrite object are consistent.
+            args_cli.object = runtime_asset_name
+            args_cli.kin_asset_name = runtime_asset_name
+            print(
+                "[HOI object] trajectory object_name="
+                f"{traj_object_name}, runtime asset={runtime_asset_name}, usd={runtime_usd}"
+            )
         object_only = getattr(args_cli, "object_only", False)
         if not object_only:
             if args_cli.policy_type == "replay" and args_cli.replay_file_path is None:

@@ -1,6 +1,593 @@
+diff --git a/isaaclab_arena/examples/policy_runner_kinematic_object_replay.py b/isaaclab_arena/examples/policy_runner_kinematic_object_replay.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..f4952d890b0813359076320f84b65a4aa239d3a4
+--- /dev/null
++++ b/isaaclab_arena/examples/policy_runner_kinematic_object_replay.py
+@@ -0,0 +1,581 @@
++#!/usr/bin/env python3
++"""Policy runner with kinematic object replay from a trajectory file."""
++
++from __future__ import annotations
++
++import numpy as np
++import os
++import random
++import re
++import torch
++import tqdm
++
++from isaaclab_arena.cli.isaaclab_arena_cli import get_isaaclab_arena_cli_parser
++from isaaclab_arena.examples.example_environments.cli import (
++    get_arena_builder_from_cli,
++    get_isaaclab_arena_example_environment_cli_parser,
++)
++from isaaclab_arena.examples.policy_runner_cli import (
++    add_gr00t_closedloop_arguments,
++    add_replay_arguments,
++    add_replay_lerobot_arguments,
++    add_zero_action_arguments,
++    create_policy,
++)
++from isaaclab_arena.utils.isaaclab_utils.simulation_app import SimulationAppContext
++
++
++def _setup_policy_argument_parser_without_parse(args_parser):
++    args_parser = get_isaaclab_arena_example_environment_cli_parser(args_parser)
++    args_parser.add_argument(
++        "--policy_type",
++        type=str,
++        choices=["zero_action", "replay", "replay_lerobot", "gr00t_closedloop"],
++        default="zero_action",
++        help="Type of policy to use. Ignored when --object-only is set.",
++    )
++    add_zero_action_arguments(args_parser)
++    add_replay_arguments(args_parser)
++    add_replay_lerobot_arguments(args_parser)
++    add_gr00t_closedloop_arguments(args_parser)
++    return args_parser
++
++
++def _add_object_replay_args(parser):
++    parser.add_argument(
++        "--kin-traj-path",
++        type=str,
++        required=True,
++        help="Path to object kinematic trajectory npz from tools/hoi_bodex_g1_bridge/build_replay.py",
++    )
++    parser.add_argument(
++        "--kin-asset-name",
++        type=str,
++        default="pick_up_object",
++        help="Asset name in env.scene to be overwritten by kinematic replay.",
++    )
++    parser.add_argument(
++        "--kin-start-step",
++        type=int,
++        default=0,
++        help="Simulation step offset to start applying object trajectory.",
++    )
++    parser.add_argument(
++        "--kin-apply-timing",
++        type=str,
++        choices=["pre_step", "post_step"],
++        default="pre_step",
++        help="Apply object kinematic pose before or after env.step(action).",
++    )
++    parser.add_argument(
++        "--kin-no-hold-last-pose",
++        action="store_true",
++        help="If set, do not keep writing last object pose after trajectory end.",
++    )
++    parser.add_argument(
++        "--max-steps",
++        type=int,
++        default=None,
++        help="Optional cap on simulation steps. By default, replay policy length is used.",
++    )
++    parser.add_argument(
++        "--object-only",
++        action="store_true",
++        help="Only replay object motion. Robot sends zero actions and stands still.",
++    )
++    parser.add_argument(
++        "--use-hoi-object",
++        action="store_true",
++        help="Use HOIFHLI object mesh corresponding to trajectory object_name instead of pre-registered assets.",
++    )
++    parser.add_argument(
++        "--hoi-root",
++        type=str,
++        default="/home/ubuntu/DATA2/workspace/xmh/hoifhli_release",
++        help="Root path of hoifhli_release.",
++    )
++    parser.add_argument(
++        "--hoi-runtime-asset-name",
++        type=str,
++        default=None,
++        help="Optional runtime asset name. Default uses object_name from trajectory.",
++    )
++    parser.add_argument(
++        "--hoi-object-scale",
++        type=str,
++        default="1.0,1.0,1.0",
++        help="Runtime HOI object scale as sx,sy,sz.",
++    )
++    parser.add_argument(
++        "--hoi-usd-cache-dir",
++        type=str,
++        default="/tmp/hoi_runtime_usd",
++        help="Directory used to cache converted runtime USD meshes.",
++    )
++
++
++def _add_video_args(parser):
++    parser.add_argument(
++        "--save-video",
++        action="store_true",
++        help="Save first-person replay video from camera observations.",
++    )
++    parser.add_argument(
++        "--video-output-dir",
++        type=str,
++        default="/home/ubuntu/DATA2/workspace/xmh/IsaacLab-Arena/.workflow_data/videos",
++        help="Directory to save output videos.",
++    )
++    parser.add_argument(
++        "--video-prefix",
++        type=str,
++        default="g1_kin_replay",
++        help="Output filename prefix for saved videos.",
++    )
++    parser.add_argument(
++        "--video-fps",
++        type=int,
++        default=30,
++        help="Output video FPS.",
++    )
++    parser.add_argument(
++        "--save-third-person",
++        action="store_true",
++        help="Also save a third-person and combined video (slower).",
++    )
++
++
++def _to_uint8_rgb(frame: np.ndarray) -> np.ndarray:
++    arr = np.asarray(frame)
++    if arr.ndim != 3:
++        raise ValueError(f"Expected HxWxC frame, got shape: {arr.shape}")
++    if arr.shape[2] == 4:
++        arr = arr[:, :, :3]
++    if np.issubdtype(arr.dtype, np.floating):
++        max_val = float(np.nanmax(arr)) if arr.size > 0 else 1.0
++        if max_val <= 1.5:
++            arr = arr * 255.0
++        arr = np.clip(arr, 0.0, 255.0).astype(np.uint8)
++    else:
++        arr = np.clip(arr, 0, 255).astype(np.uint8)
++    return arr
++
++
++def _save_frames_to_video(frames, video_path, fps=30):
++    import av
++
++    if not frames:
++        return
++    container = av.open(video_path, mode="w")
++    h, w = frames[0].shape[:2]
++    stream = container.add_stream("h264", rate=fps)
++    stream.width = w
++    stream.height = h
++    stream.pix_fmt = "yuv420p"
++    stream.options = {"crf": "18", "profile:v": "high"}
++    for frame_data in frames:
++        av_frame = av.VideoFrame.from_ndarray(frame_data, format="rgb24")
++        for packet in stream.encode(av_frame):
++            container.mux(packet)
++    for packet in stream.encode():
++        container.mux(packet)
++    container.close()
++    print(f"Video saved to: {video_path} ({len(frames)} frames)")
++
++
++def _create_third_person_camera(width=640, height=480, follow_offset=(2.0, -1.2, 1.4)):
++    import omni.replicator.core as rep
++    import omni.usd
++    from pxr import Gf, UsdGeom
++
++    stage = omni.usd.get_context().get_stage()
++    cam_path = "/World/ThirdPersonCam"
++
++    cam_prim = stage.DefinePrim(cam_path, "Camera")
++    cam = UsdGeom.Camera(cam_prim)
++    cam.GetFocalLengthAttr().Set(24.0)
++    cam.GetHorizontalApertureAttr().Set(20.955)
++    cam.GetClippingRangeAttr().Set(Gf.Vec2f(0.1, 20.0))
++
++    xform = UsdGeom.Xformable(cam_prim)
++    xform.ClearXformOpOrder()
++    translate_op = xform.AddTranslateOp()
++    rotate_op = xform.AddRotateXYZOp()
++    translate_op.Set(Gf.Vec3d(*follow_offset))
++    rotate_op.Set(Gf.Vec3f(-30.0, 0.0, 140.0))
++
++    rp = rep.create.render_product(cam_path, (width, height))
++    rgb_annot = rep.AnnotatorRegistry.get_annotator("rgb")
++    rgb_annot.attach([rp])
++
++    return rgb_annot, translate_op, rotate_op, np.array(follow_offset, dtype=np.float32)
++
++
++def _extract_robot_pos(obs, env):
++    policy_obs = obs.get("policy") if isinstance(obs, dict) else None
++    if isinstance(policy_obs, dict):
++        robot_pos = policy_obs.get("robot_pos")
++        if robot_pos is not None:
++            return robot_pos[0].detach().cpu().numpy()
++    try:
++        return env.scene["robot"].data.root_pos_w[0].detach().cpu().numpy()
++    except Exception:
++        return None
++
++
++def _update_third_person_camera(translate_op, rotate_op, robot_pos, follow_offset):
++    from pxr import Gf
++
++    target = np.asarray(robot_pos, dtype=np.float32)[:3]
++    cam_pos = target + follow_offset
++    look = target - cam_pos
++    horiz = float(np.linalg.norm(look[:2])) + 1e-6
++    yaw_deg = float(np.degrees(np.arctan2(look[1], look[0])))
++    pitch_deg = float(-np.degrees(np.arctan2(abs(look[2]), horiz)))
++    translate_op.Set(Gf.Vec3d(float(cam_pos[0]), float(cam_pos[1]), float(cam_pos[2])))
++    rotate_op.Set(Gf.Vec3f(pitch_deg, 0.0, yaw_deg))
++
++
++def _read_third_person_frame(rgb_annot):
++    data = rgb_annot.get_data()
++    if data is None or len(data) == 0:
++        return None
++    return _to_uint8_rgb(np.array(data))
++
++
++def _read_object_name_from_traj_npz(kin_traj_path: str) -> str:
++    data = np.load(kin_traj_path, allow_pickle=True)
++    if "object_name" not in data:
++        raise KeyError(f"{kin_traj_path} does not contain key `object_name`.")
++    raw_name = data["object_name"]
++    if isinstance(raw_name, np.ndarray):
++        if raw_name.shape == ():
++            raw_name = raw_name.item()
++        elif raw_name.size > 0:
++            raw_name = raw_name.reshape(-1)[0]
++    name = str(raw_name).strip()
++    if not name:
++        raise ValueError(f"Empty object_name in {kin_traj_path}.")
++    return name
++
++
++def _parse_scale_csv(text: str) -> tuple[float, float, float]:
++    values = [float(x.strip()) for x in text.split(",")]
++    if len(values) != 3:
++        raise ValueError(f"--hoi-object-scale must have 3 values, got: {text}")
++    return float(values[0]), float(values[1]), float(values[2])
++
++
++def _sanitize_asset_name(name: str) -> str:
++    safe = re.sub(r"[^0-9a-zA-Z_]", "_", name)
++    if not safe:
++        safe = "hoi_object"
++    if safe[0].isdigit():
++        safe = f"obj_{safe}"
++    return safe
++
++
++def _resolve_hoi_mesh_path(hoi_root: str, object_name: str, cache_dir: str) -> str:
++    candidates = [
++        os.path.join(hoi_root, "grasp_generation", "objects", f"{object_name}.obj"),
++        os.path.join(hoi_root, "data", "processed_data", "captured_objects", f"{object_name}.obj"),
++        os.path.join(hoi_root, "data", "processed_data", "rest_object_geo", f"{object_name}.obj"),
++    ]
++    for path in candidates:
++        if os.path.exists(path):
++            return path
++
++    rest_ply = os.path.join(hoi_root, "data", "processed_data", "rest_object_geo", f"{object_name}.ply")
++    if os.path.exists(rest_ply):
++        import trimesh
++
++        os.makedirs(cache_dir, exist_ok=True)
++        out_obj = os.path.join(cache_dir, f"{object_name}.obj")
++        mesh = trimesh.load(rest_ply, force="mesh")
++        mesh.export(out_obj)
++        return out_obj
++
++    raise FileNotFoundError(
++        f"Cannot find mesh for HOI object `{object_name}` under {hoi_root}. "
++        "Expected .obj in grasp_generation/objects or processed_data/captured_objects, "
++        "or .ply in processed_data/rest_object_geo."
++    )
++
++
++def _convert_mesh_to_runtime_usd(
++    mesh_path: str,
++    usd_cache_dir: str,
++    asset_name: str,
++    scale: tuple[float, float, float],
++) -> str:
++    from isaaclab.sim.converters import MeshConverter, MeshConverterCfg
++    from isaaclab.sim.schemas import schemas_cfg
++
++    os.makedirs(usd_cache_dir, exist_ok=True)
++    cfg = MeshConverterCfg(
++        asset_path=os.path.abspath(mesh_path),
++        force_usd_conversion=True,
++        usd_dir=os.path.abspath(usd_cache_dir),
++        usd_file_name=f"{asset_name}.usd",
++        make_instanceable=True,
++        collision_props=schemas_cfg.CollisionPropertiesCfg(collision_enabled=True),
++        mesh_collision_props=schemas_cfg.ConvexHullPropertiesCfg(),
++        rigid_props=schemas_cfg.RigidBodyPropertiesCfg(),
++        mass_props=schemas_cfg.MassPropertiesCfg(mass=0.5),
++        scale=scale,
++    )
++    converter = MeshConverter(cfg)
++    return converter.usd_path
++
++
++def _register_runtime_object_asset(asset_name: str, usd_path: str, scale: tuple[float, float, float]) -> None:
++    from isaaclab_arena.assets.asset_registry import AssetRegistry
++    from isaaclab_arena.assets.object import Object
++
++    registry = AssetRegistry()
++    if registry.is_registered(asset_name):
++        return
++
++    def _init(self, prim_path=None, initial_pose=None):
++        Object.__init__(
++            self,
++            name=asset_name,
++            prim_path=prim_path,
++            tags=["object"],
++            usd_path=usd_path,
++            scale=scale,
++            initial_pose=initial_pose,
++        )
++
++    runtime_cls = type(
++        f"RuntimeHoiObject_{asset_name}",
++        (Object,),
++        {
++            "name": asset_name,
++            "tags": ["object"],
++            "usd_path": usd_path,
++            "scale": scale,
++            "__init__": _init,
++        },
++    )
++    registry.register(runtime_cls)
++
++
++def _prepare_runtime_hoi_object_asset(
++    kin_traj_path: str,
++    hoi_root: str,
++    runtime_asset_name: str | None,
++    object_scale: tuple[float, float, float],
++    usd_cache_dir: str,
++) -> tuple[str, str, str]:
++    traj_object_name = _read_object_name_from_traj_npz(kin_traj_path)
++    asset_name = _sanitize_asset_name(runtime_asset_name or traj_object_name)
++    mesh_cache_dir = os.path.join(usd_cache_dir, "mesh_cache")
++    mesh_path = _resolve_hoi_mesh_path(hoi_root, traj_object_name, mesh_cache_dir)
++    usd_path = _convert_mesh_to_runtime_usd(mesh_path, usd_cache_dir, asset_name, object_scale)
++    _register_runtime_object_asset(asset_name, usd_path, object_scale)
++    return traj_object_name, asset_name, usd_path
++
++
++class ObjectKinematicReplayer:
++    def __init__(
++        self,
++        object_traj_path: str,
++        object_asset_name: str,
++        device: torch.device,
++        hold_last_pose: bool,
++        start_step: int,
++    ):
++        data = np.load(object_traj_path, allow_pickle=True)
++        if "object_pos_w" not in data or "object_quat_wxyz" not in data:
++            raise KeyError(
++                f"{object_traj_path} must contain object_pos_w and object_quat_wxyz. "
++                f"Found keys: {list(data.keys())}"
++            )
++        self.object_pos_w = torch.as_tensor(data["object_pos_w"], dtype=torch.float32, device=device)
++        self.object_quat_wxyz = torch.as_tensor(data["object_quat_wxyz"], dtype=torch.float32, device=device)
++        if self.object_pos_w.ndim != 2 or self.object_pos_w.shape[1] != 3:
++            raise ValueError(f"object_pos_w should be [T,3], got {tuple(self.object_pos_w.shape)}")
++        if self.object_quat_wxyz.ndim != 2 or self.object_quat_wxyz.shape[1] != 4:
++            raise ValueError(f"object_quat_wxyz should be [T,4], got {tuple(self.object_quat_wxyz.shape)}")
++        if self.object_pos_w.shape[0] != self.object_quat_wxyz.shape[0]:
++            raise ValueError(
++                f"object_pos_w length {self.object_pos_w.shape[0]} != object_quat_wxyz length {self.object_quat_wxyz.shape[0]}"
++            )
++
++        self.object_asset_name = object_asset_name
++        self.hold_last_pose = hold_last_pose
++        self.start_step = max(0, int(start_step))
++        self.length = int(self.object_pos_w.shape[0])
++        self.zero_vel = torch.zeros((1, 6), dtype=torch.float32, device=device)
++
++    def _step_to_index(self, step: int) -> int | None:
++        if step < self.start_step:
++            return None
++        idx = step - self.start_step
++        if idx >= self.length:
++            if not self.hold_last_pose:
++                return None
++            idx = self.length - 1
++        return idx
++
++    def apply(self, env, step: int) -> None:
++        idx = self._step_to_index(step)
++        if idx is None:
++            return
++        if env.num_envs != 1:
++            raise ValueError("Kinematic object replay currently supports num_envs == 1 only.")
++        asset = env.scene[self.object_asset_name]
++        pose_w = torch.cat(
++            [self.object_pos_w[idx].unsqueeze(0), self.object_quat_wxyz[idx].unsqueeze(0)],
++            dim=-1,
++        )
++        env_ids = torch.tensor([0], device=env.device, dtype=torch.long)
++        asset.write_root_pose_to_sim(pose_w, env_ids=env_ids)
++        asset.write_root_velocity_to_sim(self.zero_vel, env_ids=env_ids)
++
++
++def main():
++    args_parser = get_isaaclab_arena_cli_parser()
++    args_cli, _ = args_parser.parse_known_args()
++
++    with SimulationAppContext(args_cli):
++        args_parser = _setup_policy_argument_parser_without_parse(args_parser)
++        _add_object_replay_args(args_parser)
++        _add_video_args(args_parser)
++        args_cli = args_parser.parse_args()
++        if args_cli.use_hoi_object:
++            object_scale = _parse_scale_csv(args_cli.hoi_object_scale)
++            traj_object_name, runtime_asset_name, runtime_usd = _prepare_runtime_hoi_object_asset(
++                kin_traj_path=args_cli.kin_traj_path,
++                hoi_root=args_cli.hoi_root,
++                runtime_asset_name=args_cli.hoi_runtime_asset_name,
++                object_scale=object_scale,
++                usd_cache_dir=args_cli.hoi_usd_cache_dir,
++            )
++            # Ensure env scene object and kinematic overwrite object are consistent.
++            args_cli.object = runtime_asset_name
++            args_cli.kin_asset_name = runtime_asset_name
++            print(
++                "[HOI object] trajectory object_name="
++                f"{traj_object_name}, runtime asset={runtime_asset_name}, usd={runtime_usd}"
++            )
++        object_only = getattr(args_cli, "object_only", False)
++        if not object_only:
++            if args_cli.policy_type == "replay" and args_cli.replay_file_path is None:
++                raise ValueError("--replay_file_path is required when using --policy_type replay")
++            if args_cli.policy_type == "replay_lerobot" and args_cli.config_yaml_path is None:
++                raise ValueError("--config_yaml_path is required when using --policy_type replay_lerobot")
++            if args_cli.policy_type == "gr00t_closedloop" and args_cli.policy_config_yaml_path is None:
++                raise ValueError("--policy_config_yaml_path is required when using --policy_type gr00t_closedloop")
++
++        arena_builder = get_arena_builder_from_cli(args_cli)
++        env = arena_builder.make_registered()
++
++        if args_cli.seed is not None:
++            env.seed(args_cli.seed)
++            torch.manual_seed(args_cli.seed)
++            np.random.seed(args_cli.seed)
++            random.seed(args_cli.seed)
++
++        obs, _ = env.reset()
++        if object_only:
++            policy = None
++            policy_steps = 0
++        else:
++            policy, policy_steps = create_policy(args_cli)
++        tp_camera = _create_third_person_camera() if (args_cli.save_video and args_cli.save_third_person) else None
++        fp_frames = []
++        tp_frames = []
++
++        object_replayer = ObjectKinematicReplayer(
++            object_traj_path=args_cli.kin_traj_path,
++            object_asset_name=args_cli.kin_asset_name,
++            device=env.device,
++            hold_last_pose=not args_cli.kin_no_hold_last_pose,
++            start_step=args_cli.kin_start_step,
++        )
++
++        if object_only:
++            step_budget = object_replayer.length
++            if args_cli.max_steps is not None:
++                step_budget = min(step_budget, args_cli.max_steps)
++        else:
++            step_budget = policy_steps if args_cli.max_steps is None else min(policy_steps, args_cli.max_steps)
++
++        # lazy import to avoid app startup stalls
++        from isaaclab_arena.metrics.metrics import compute_metrics
++
++        for step in tqdm.tqdm(range(step_budget)):
++            with torch.inference_mode():
++                if args_cli.kin_apply_timing == "pre_step":
++                    object_replayer.apply(env, step)
++
++                if object_only:
++                    action_dim = env.action_space.shape[-1] if hasattr(env, "action_space") else 23
++                    actions = torch.zeros((env.num_envs, action_dim), device=env.device)
++                else:
++                    actions = policy.get_action(env, obs)
++                    if actions is None:
++                        print(f"Policy returned None at step {step}, stopping replay.")
++                        break
++                obs, _, terminated, truncated, _ = env.step(actions)
++
++                if args_cli.kin_apply_timing == "post_step":
++                    object_replayer.apply(env, step)
++
++                if args_cli.save_video:
++                    if "camera_obs" in obs:
++                        cam_keys = list(obs["camera_obs"].keys())
++                        if cam_keys:
++                            cam_img = obs["camera_obs"][cam_keys[0]]
++                            fp_frames.append(_to_uint8_rgb(cam_img[0].cpu().numpy()))
++
++                    if tp_camera is not None:
++                        tp_annotator, tp_translate_op, tp_rotate_op, tp_follow_offset = tp_camera
++                        robot_pos = _extract_robot_pos(obs, env)
++                        if robot_pos is not None:
++                            _update_third_person_camera(tp_translate_op, tp_rotate_op, robot_pos, tp_follow_offset)
++                        tp_frame = _read_third_person_frame(tp_annotator)
++                        if tp_frame is not None:
++                            tp_frames.append(tp_frame)
++
++                if terminated.any() or truncated.any():
++                    print(
++                        f"Resetting policy for terminated env_ids: {terminated.nonzero().flatten()}"
++                        f" and truncated env_ids: {truncated.nonzero().flatten()}"
++                    )
++                    env_ids = (terminated | truncated).nonzero().flatten()
++                    if policy is not None:
++                        policy.reset(env_ids=env_ids)
++
++        metrics = compute_metrics(env)
++        print(f"Metrics: {metrics}")
++
++        if args_cli.save_video:
++            os.makedirs(args_cli.video_output_dir, exist_ok=True)
++            fp_path = os.path.join(args_cli.video_output_dir, f"{args_cli.video_prefix}_first_person.mp4")
++            _save_frames_to_video(fp_frames, fp_path, fps=args_cli.video_fps)
++
++            if tp_frames:
++                tp_path = os.path.join(args_cli.video_output_dir, f"{args_cli.video_prefix}_third_person.mp4")
++                _save_frames_to_video(tp_frames, tp_path, fps=args_cli.video_fps)
++
++            if fp_frames and tp_frames:
++                from PIL import Image
++
++                min_len = min(len(fp_frames), len(tp_frames))
++                combined = []
++                for i in range(min_len):
++                    fp = fp_frames[i]
++                    tp = tp_frames[i]
++                    if fp.shape[0] != tp.shape[0]:
++                        tp = np.array(Image.fromarray(tp).resize((fp.shape[1], fp.shape[0])))
++                    combined.append(np.concatenate([fp, tp], axis=1))
++                combined_path = os.path.join(args_cli.video_output_dir, f"{args_cli.video_prefix}_combined.mp4")
++                _save_frames_to_video(combined, combined_path, fps=args_cli.video_fps)
++        env.close()
++
++
++if __name__ == "__main__":
++    main()
 diff --git a/tools/hoi_bodex_g1_bridge/build_replay.py b/tools/hoi_bodex_g1_bridge/build_replay.py
 new file mode 100644
-index 00000000..77492d5f
+index 0000000000000000000000000000000000000000..77492d5f30cabae44b852cbfcffa19965fde1c5d
 --- /dev/null
 +++ b/tools/hoi_bodex_g1_bridge/build_replay.py
 @@ -0,0 +1,650 @@
@@ -654,766 +1241,3 @@ index 00000000..77492d5f
 +
 +if __name__ == "__main__":
 +    main()
-diff --git a/isaaclab_arena/examples/policy_runner_kinematic_object_replay.py b/isaaclab_arena/examples/policy_runner_kinematic_object_replay.py
-new file mode 100644
-index 00000000..19c6ef4f
---- /dev/null
-+++ b/isaaclab_arena/examples/policy_runner_kinematic_object_replay.py
-@@ -0,0 +1,401 @@
-+#!/usr/bin/env python3
-+"""Policy runner with kinematic object replay from a trajectory file."""
-+
-+from __future__ import annotations
-+
-+import numpy as np
-+import os
-+import random
-+import torch
-+import tqdm
-+
-+from isaaclab_arena.cli.isaaclab_arena_cli import get_isaaclab_arena_cli_parser
-+from isaaclab_arena.examples.example_environments.cli import (
-+    get_arena_builder_from_cli,
-+    get_isaaclab_arena_example_environment_cli_parser,
-+)
-+from isaaclab_arena.examples.policy_runner_cli import (
-+    add_gr00t_closedloop_arguments,
-+    add_replay_arguments,
-+    add_replay_lerobot_arguments,
-+    add_zero_action_arguments,
-+    create_policy,
-+)
-+from isaaclab_arena.utils.isaaclab_utils.simulation_app import SimulationAppContext
-+
-+
-+def _setup_policy_argument_parser_without_parse(args_parser):
-+    args_parser = get_isaaclab_arena_example_environment_cli_parser(args_parser)
-+    args_parser.add_argument(
-+        "--policy_type",
-+        type=str,
-+        choices=["zero_action", "replay", "replay_lerobot", "gr00t_closedloop"],
-+        default="zero_action",
-+        help="Type of policy to use. Ignored when --object-only is set.",
-+    )
-+    add_zero_action_arguments(args_parser)
-+    add_replay_arguments(args_parser)
-+    add_replay_lerobot_arguments(args_parser)
-+    add_gr00t_closedloop_arguments(args_parser)
-+    return args_parser
-+
-+
-+def _add_object_replay_args(parser):
-+    parser.add_argument(
-+        "--kin-traj-path",
-+        type=str,
-+        required=True,
-+        help="Path to object kinematic trajectory npz from tools/hoi_bodex_g1_bridge/build_replay.py",
-+    )
-+    parser.add_argument(
-+        "--kin-asset-name",
-+        type=str,
-+        default="pick_up_object",
-+        help="Asset name in env.scene to be overwritten by kinematic replay.",
-+    )
-+    parser.add_argument(
-+        "--kin-start-step",
-+        type=int,
-+        default=0,
-+        help="Simulation step offset to start applying object trajectory.",
-+    )
-+    parser.add_argument(
-+        "--kin-apply-timing",
-+        type=str,
-+        choices=["pre_step", "post_step"],
-+        default="pre_step",
-+        help="Apply object kinematic pose before or after env.step(action).",
-+    )
-+    parser.add_argument(
-+        "--kin-no-hold-last-pose",
-+        action="store_true",
-+        help="If set, do not keep writing last object pose after trajectory end.",
-+    )
-+    parser.add_argument(
-+        "--max-steps",
-+        type=int,
-+        default=None,
-+        help="Optional cap on simulation steps. By default, replay policy length is used.",
-+    )
-+    parser.add_argument(
-+        "--object-only",
-+        action="store_true",
-+        help="Only replay object motion. Robot sends zero actions and stands still.",
-+    )
-+
-+
-+def _add_video_args(parser):
-+    parser.add_argument(
-+        "--save-video",
-+        action="store_true",
-+        help="Save first-person replay video from camera observations.",
-+    )
-+    parser.add_argument(
-+        "--video-output-dir",
-+        type=str,
-+        default="/home/ubuntu/DATA2/workspace/xmh/IsaacLab-Arena/.workflow_data/videos",
-+        help="Directory to save output videos.",
-+    )
-+    parser.add_argument(
-+        "--video-prefix",
-+        type=str,
-+        default="g1_kin_replay",
-+        help="Output filename prefix for saved videos.",
-+    )
-+    parser.add_argument(
-+        "--video-fps",
-+        type=int,
-+        default=30,
-+        help="Output video FPS.",
-+    )
-+    parser.add_argument(
-+        "--save-third-person",
-+        action="store_true",
-+        help="Also save a third-person and combined video (slower).",
-+    )
-+
-+
-+def _to_uint8_rgb(frame: np.ndarray) -> np.ndarray:
-+    arr = np.asarray(frame)
-+    if arr.ndim != 3:
-+        raise ValueError(f"Expected HxWxC frame, got shape: {arr.shape}")
-+    if arr.shape[2] == 4:
-+        arr = arr[:, :, :3]
-+    if np.issubdtype(arr.dtype, np.floating):
-+        max_val = float(np.nanmax(arr)) if arr.size > 0 else 1.0
-+        if max_val <= 1.5:
-+            arr = arr * 255.0
-+        arr = np.clip(arr, 0.0, 255.0).astype(np.uint8)
-+    else:
-+        arr = np.clip(arr, 0, 255).astype(np.uint8)
-+    return arr
-+
-+
-+def _save_frames_to_video(frames, video_path, fps=30):
-+    import av
-+
-+    if not frames:
-+        return
-+    container = av.open(video_path, mode="w")
-+    h, w = frames[0].shape[:2]
-+    stream = container.add_stream("h264", rate=fps)
-+    stream.width = w
-+    stream.height = h
-+    stream.pix_fmt = "yuv420p"
-+    stream.options = {"crf": "18", "profile:v": "high"}
-+    for frame_data in frames:
-+        av_frame = av.VideoFrame.from_ndarray(frame_data, format="rgb24")
-+        for packet in stream.encode(av_frame):
-+            container.mux(packet)
-+    for packet in stream.encode():
-+        container.mux(packet)
-+    container.close()
-+    print(f"Video saved to: {video_path} ({len(frames)} frames)")
-+
-+
-+def _create_third_person_camera(width=640, height=480, follow_offset=(2.0, -1.2, 1.4)):
-+    import omni.replicator.core as rep
-+    import omni.usd
-+    from pxr import Gf, UsdGeom
-+
-+    stage = omni.usd.get_context().get_stage()
-+    cam_path = "/World/ThirdPersonCam"
-+
-+    cam_prim = stage.DefinePrim(cam_path, "Camera")
-+    cam = UsdGeom.Camera(cam_prim)
-+    cam.GetFocalLengthAttr().Set(24.0)
-+    cam.GetHorizontalApertureAttr().Set(20.955)
-+    cam.GetClippingRangeAttr().Set(Gf.Vec2f(0.1, 20.0))
-+
-+    xform = UsdGeom.Xformable(cam_prim)
-+    xform.ClearXformOpOrder()
-+    translate_op = xform.AddTranslateOp()
-+    rotate_op = xform.AddRotateXYZOp()
-+    translate_op.Set(Gf.Vec3d(*follow_offset))
-+    rotate_op.Set(Gf.Vec3f(-30.0, 0.0, 140.0))
-+
-+    rp = rep.create.render_product(cam_path, (width, height))
-+    rgb_annot = rep.AnnotatorRegistry.get_annotator("rgb")
-+    rgb_annot.attach([rp])
-+
-+    return rgb_annot, translate_op, rotate_op, np.array(follow_offset, dtype=np.float32)
-+
-+
-+def _extract_robot_pos(obs, env):
-+    policy_obs = obs.get("policy") if isinstance(obs, dict) else None
-+    if isinstance(policy_obs, dict):
-+        robot_pos = policy_obs.get("robot_pos")
-+        if robot_pos is not None:
-+            return robot_pos[0].detach().cpu().numpy()
-+    try:
-+        return env.scene["robot"].data.root_pos_w[0].detach().cpu().numpy()
-+    except Exception:
-+        return None
-+
-+
-+def _update_third_person_camera(translate_op, rotate_op, robot_pos, follow_offset):
-+    from pxr import Gf
-+
-+    target = np.asarray(robot_pos, dtype=np.float32)[:3]
-+    cam_pos = target + follow_offset
-+    look = target - cam_pos
-+    horiz = float(np.linalg.norm(look[:2])) + 1e-6
-+    yaw_deg = float(np.degrees(np.arctan2(look[1], look[0])))
-+    pitch_deg = float(-np.degrees(np.arctan2(abs(look[2]), horiz)))
-+    translate_op.Set(Gf.Vec3d(float(cam_pos[0]), float(cam_pos[1]), float(cam_pos[2])))
-+    rotate_op.Set(Gf.Vec3f(pitch_deg, 0.0, yaw_deg))
-+
-+
-+def _read_third_person_frame(rgb_annot):
-+    data = rgb_annot.get_data()
-+    if data is None or len(data) == 0:
-+        return None
-+    return _to_uint8_rgb(np.array(data))
-+
-+
-+class ObjectKinematicReplayer:
-+    def __init__(
-+        self,
-+        object_traj_path: str,
-+        object_asset_name: str,
-+        device: torch.device,
-+        hold_last_pose: bool,
-+        start_step: int,
-+    ):
-+        data = np.load(object_traj_path, allow_pickle=True)
-+        if "object_pos_w" not in data or "object_quat_wxyz" not in data:
-+            raise KeyError(
-+                f"{object_traj_path} must contain object_pos_w and object_quat_wxyz. "
-+                f"Found keys: {list(data.keys())}"
-+            )
-+        self.object_pos_w = torch.as_tensor(data["object_pos_w"], dtype=torch.float32, device=device)
-+        self.object_quat_wxyz = torch.as_tensor(data["object_quat_wxyz"], dtype=torch.float32, device=device)
-+        if self.object_pos_w.ndim != 2 or self.object_pos_w.shape[1] != 3:
-+            raise ValueError(f"object_pos_w should be [T,3], got {tuple(self.object_pos_w.shape)}")
-+        if self.object_quat_wxyz.ndim != 2 or self.object_quat_wxyz.shape[1] != 4:
-+            raise ValueError(f"object_quat_wxyz should be [T,4], got {tuple(self.object_quat_wxyz.shape)}")
-+        if self.object_pos_w.shape[0] != self.object_quat_wxyz.shape[0]:
-+            raise ValueError(
-+                f"object_pos_w length {self.object_pos_w.shape[0]} != object_quat_wxyz length {self.object_quat_wxyz.shape[0]}"
-+            )
-+
-+        self.object_asset_name = object_asset_name
-+        self.hold_last_pose = hold_last_pose
-+        self.start_step = max(0, int(start_step))
-+        self.length = int(self.object_pos_w.shape[0])
-+        self.zero_vel = torch.zeros((1, 6), dtype=torch.float32, device=device)
-+
-+    def _step_to_index(self, step: int) -> int | None:
-+        if step < self.start_step:
-+            return None
-+        idx = step - self.start_step
-+        if idx >= self.length:
-+            if not self.hold_last_pose:
-+                return None
-+            idx = self.length - 1
-+        return idx
-+
-+    def apply(self, env, step: int) -> None:
-+        idx = self._step_to_index(step)
-+        if idx is None:
-+            return
-+        if env.num_envs != 1:
-+            raise ValueError("Kinematic object replay currently supports num_envs == 1 only.")
-+        asset = env.scene[self.object_asset_name]
-+        pose_w = torch.cat(
-+            [self.object_pos_w[idx].unsqueeze(0), self.object_quat_wxyz[idx].unsqueeze(0)],
-+            dim=-1,
-+        )
-+        env_ids = torch.tensor([0], device=env.device, dtype=torch.long)
-+        asset.write_root_pose_to_sim(pose_w, env_ids=env_ids)
-+        asset.write_root_velocity_to_sim(self.zero_vel, env_ids=env_ids)
-+
-+
-+def main():
-+    args_parser = get_isaaclab_arena_cli_parser()
-+    args_cli, _ = args_parser.parse_known_args()
-+
-+    with SimulationAppContext(args_cli):
-+        args_parser = _setup_policy_argument_parser_without_parse(args_parser)
-+        _add_object_replay_args(args_parser)
-+        _add_video_args(args_parser)
-+        args_cli = args_parser.parse_args()
-+        object_only = getattr(args_cli, "object_only", False)
-+        if not object_only:
-+            if args_cli.policy_type == "replay" and args_cli.replay_file_path is None:
-+                raise ValueError("--replay_file_path is required when using --policy_type replay")
-+            if args_cli.policy_type == "replay_lerobot" and args_cli.config_yaml_path is None:
-+                raise ValueError("--config_yaml_path is required when using --policy_type replay_lerobot")
-+            if args_cli.policy_type == "gr00t_closedloop" and args_cli.policy_config_yaml_path is None:
-+                raise ValueError("--policy_config_yaml_path is required when using --policy_type gr00t_closedloop")
-+
-+        arena_builder = get_arena_builder_from_cli(args_cli)
-+        env = arena_builder.make_registered()
-+
-+        if args_cli.seed is not None:
-+            env.seed(args_cli.seed)
-+            torch.manual_seed(args_cli.seed)
-+            np.random.seed(args_cli.seed)
-+            random.seed(args_cli.seed)
-+
-+        obs, _ = env.reset()
-+        if object_only:
-+            policy = None
-+            policy_steps = 0
-+        else:
-+            policy, policy_steps = create_policy(args_cli)
-+        tp_camera = _create_third_person_camera() if (args_cli.save_video and args_cli.save_third_person) else None
-+        fp_frames = []
-+        tp_frames = []
-+
-+        object_replayer = ObjectKinematicReplayer(
-+            object_traj_path=args_cli.kin_traj_path,
-+            object_asset_name=args_cli.kin_asset_name,
-+            device=env.device,
-+            hold_last_pose=not args_cli.kin_no_hold_last_pose,
-+            start_step=args_cli.kin_start_step,
-+        )
-+
-+        if object_only:
-+            step_budget = object_replayer.length
-+            if args_cli.max_steps is not None:
-+                step_budget = min(step_budget, args_cli.max_steps)
-+        else:
-+            step_budget = policy_steps if args_cli.max_steps is None else min(policy_steps, args_cli.max_steps)
-+
-+        # lazy import to avoid app startup stalls
-+        from isaaclab_arena.metrics.metrics import compute_metrics
-+
-+        for step in tqdm.tqdm(range(step_budget)):
-+            with torch.inference_mode():
-+                if args_cli.kin_apply_timing == "pre_step":
-+                    object_replayer.apply(env, step)
-+
-+                if object_only:
-+                    action_dim = env.action_space.shape[-1] if hasattr(env, "action_space") else 23
-+                    actions = torch.zeros((env.num_envs, action_dim), device=env.device)
-+                else:
-+                    actions = policy.get_action(env, obs)
-+                    if actions is None:
-+                        print(f"Policy returned None at step {step}, stopping replay.")
-+                        break
-+                obs, _, terminated, truncated, _ = env.step(actions)
-+
-+                if args_cli.kin_apply_timing == "post_step":
-+                    object_replayer.apply(env, step)
-+
-+                if args_cli.save_video:
-+                    if "camera_obs" in obs:
-+                        cam_keys = list(obs["camera_obs"].keys())
-+                        if cam_keys:
-+                            cam_img = obs["camera_obs"][cam_keys[0]]
-+                            fp_frames.append(_to_uint8_rgb(cam_img[0].cpu().numpy()))
-+
-+                    if tp_camera is not None:
-+                        tp_annotator, tp_translate_op, tp_rotate_op, tp_follow_offset = tp_camera
-+                        robot_pos = _extract_robot_pos(obs, env)
-+                        if robot_pos is not None:
-+                            _update_third_person_camera(tp_translate_op, tp_rotate_op, robot_pos, tp_follow_offset)
-+                        tp_frame = _read_third_person_frame(tp_annotator)
-+                        if tp_frame is not None:
-+                            tp_frames.append(tp_frame)
-+
-+                if terminated.any() or truncated.any():
-+                    print(
-+                        f"Resetting policy for terminated env_ids: {terminated.nonzero().flatten()}"
-+                        f" and truncated env_ids: {truncated.nonzero().flatten()}"
-+                    )
-+                    env_ids = (terminated | truncated).nonzero().flatten()
-+                    if policy is not None:
-+                        policy.reset(env_ids=env_ids)
-+
-+        metrics = compute_metrics(env)
-+        print(f"Metrics: {metrics}")
-+
-+        if args_cli.save_video:
-+            os.makedirs(args_cli.video_output_dir, exist_ok=True)
-+            fp_path = os.path.join(args_cli.video_output_dir, f"{args_cli.video_prefix}_first_person.mp4")
-+            _save_frames_to_video(fp_frames, fp_path, fps=args_cli.video_fps)
-+
-+            if tp_frames:
-+                tp_path = os.path.join(args_cli.video_output_dir, f"{args_cli.video_prefix}_third_person.mp4")
-+                _save_frames_to_video(tp_frames, tp_path, fps=args_cli.video_fps)
-+
-+            if fp_frames and tp_frames:
-+                from PIL import Image
-+
-+                min_len = min(len(fp_frames), len(tp_frames))
-+                combined = []
-+                for i in range(min_len):
-+                    fp = fp_frames[i]
-+                    tp = tp_frames[i]
-+                    if fp.shape[0] != tp.shape[0]:
-+                        tp = np.array(Image.fromarray(tp).resize((fp.shape[1], fp.shape[0])))
-+                    combined.append(np.concatenate([fp, tp], axis=1))
-+                combined_path = os.path.join(args_cli.video_output_dir, f"{args_cli.video_prefix}_combined.mp4")
-+                _save_frames_to_video(combined, combined_path, fps=args_cli.video_fps)
-+        env.close()
-+
-+
-+if __name__ == "__main__":
-+    main()
-diff --git a/isaaclab_arena/examples/policy_runner_with_video.py b/isaaclab_arena/examples/policy_runner_with_video.py
-new file mode 100644
-index 00000000..8c5f3674
---- /dev/null
-+++ b/isaaclab_arena/examples/policy_runner_with_video.py
-@@ -0,0 +1,226 @@
-+# Copyright (c) 2025, The Isaac Lab Arena Project Developers.
-+# Modified version of policy_runner.py that saves video output.
-+# Supports first-person (robot head cam) and third-person (global) views.
-+
-+import numpy as np
-+import os
-+import random
-+import torch
-+import tqdm
-+
-+from isaaclab_arena.cli.isaaclab_arena_cli import get_isaaclab_arena_cli_parser
-+from isaaclab_arena.examples.example_environments.cli import get_arena_builder_from_cli
-+from isaaclab_arena.examples.policy_runner_cli import create_policy, setup_policy_argument_parser
-+from isaaclab_arena.utils.isaaclab_utils.simulation_app import SimulationAppContext
-+
-+
-+def to_uint8_rgb(frame: np.ndarray) -> np.ndarray:
-+    """Convert camera frame to uint8 RGB robustly across float/uint input formats."""
-+    arr = np.asarray(frame)
-+    if arr.ndim != 3:
-+        raise ValueError(f"Expected HxWxC frame, got shape: {arr.shape}")
-+    if arr.shape[2] == 4:
-+        arr = arr[:, :, :3]
-+    if np.issubdtype(arr.dtype, np.floating):
-+        max_val = float(np.nanmax(arr)) if arr.size > 0 else 1.0
-+        if max_val <= 1.5:
-+            arr = arr * 255.0
-+        arr = np.clip(arr, 0.0, 255.0).astype(np.uint8)
-+    else:
-+        arr = np.clip(arr, 0, 255).astype(np.uint8)
-+    return arr
-+
-+
-+def save_frames_to_video(frames, video_path, fps=30):
-+    """Save a list of numpy frames to an MP4 video."""
-+    import av
-+
-+    if not frames:
-+        return
-+    container = av.open(video_path, mode="w")
-+    h, w = frames[0].shape[:2]
-+    stream = container.add_stream("h264", rate=fps)
-+    stream.width = w
-+    stream.height = h
-+    stream.pix_fmt = "yuv420p"
-+    stream.options = {"crf": "18", "profile:v": "high"}
-+    for frame_data in frames:
-+        av_frame = av.VideoFrame.from_ndarray(frame_data, format="rgb24")
-+        for packet in stream.encode(av_frame):
-+            container.mux(packet)
-+    for packet in stream.encode():
-+        container.mux(packet)
-+    container.close()
-+    print(f"Video saved to: {video_path} ({len(frames)} frames)")
-+
-+
-+def create_third_person_camera(width=640, height=480, follow_offset=(2.0, -1.2, 1.4)):
-+    """Create a third-person camera that can be updated to follow the robot."""
-+    import omni.usd
-+    from pxr import Gf, UsdGeom
-+
-+    stage = omni.usd.get_context().get_stage()
-+    cam_path = "/World/ThirdPersonCam"
-+
-+    # Create camera prim
-+    cam_prim = stage.DefinePrim(cam_path, "Camera")
-+    cam = UsdGeom.Camera(cam_prim)
-+    cam.GetFocalLengthAttr().Set(24.0)
-+    cam.GetHorizontalApertureAttr().Set(20.955)
-+    cam.GetClippingRangeAttr().Set(Gf.Vec2f(0.1, 20.0))
-+
-+    # Set camera transform with follow offset.
-+    xform = UsdGeom.Xformable(cam_prim)
-+    xform.ClearXformOpOrder()
-+    translate_op = xform.AddTranslateOp()
-+    rotate_op = xform.AddRotateXYZOp()
-+    translate_op.Set(Gf.Vec3d(*follow_offset))
-+    rotate_op.Set(Gf.Vec3f(-30.0, 0.0, 140.0))
-+
-+    # Create render product via replicator
-+    import omni.replicator.core as rep
-+    rp = rep.create.render_product(cam_path, (width, height))
-+
-+    # Create annotator to read RGB
-+    rgb_annot = rep.AnnotatorRegistry.get_annotator("rgb")
-+    rgb_annot.attach([rp])
-+
-+    return rgb_annot, translate_op, rotate_op, np.array(follow_offset, dtype=np.float32)
-+
-+
-+def _extract_robot_pos(obs, env):
-+    """Best-effort extraction of robot world position from observations/runtime state."""
-+    policy_obs = obs.get("policy") if isinstance(obs, dict) else None
-+    if isinstance(policy_obs, dict):
-+        robot_pos = policy_obs.get("robot_pos")
-+        if robot_pos is not None:
-+            return robot_pos[0].detach().cpu().numpy()
-+    try:
-+        return env.scene["robot"].data.root_pos_w[0].detach().cpu().numpy()
-+    except Exception:
-+        return None
-+
-+
-+def _update_third_person_camera(translate_op, rotate_op, robot_pos, follow_offset):
-+    """Update third-person camera to follow and look at the robot."""
-+    from pxr import Gf
-+
-+    target = np.asarray(robot_pos, dtype=np.float32)[:3]
-+    cam_pos = target + follow_offset
-+    look = target - cam_pos
-+    horiz = float(np.linalg.norm(look[:2])) + 1e-6
-+    yaw_deg = float(np.degrees(np.arctan2(look[1], look[0])))
-+    pitch_deg = float(-np.degrees(np.arctan2(abs(look[2]), horiz)))
-+    translate_op.Set(Gf.Vec3d(float(cam_pos[0]), float(cam_pos[1]), float(cam_pos[2])))
-+    rotate_op.Set(Gf.Vec3f(pitch_deg, 0.0, yaw_deg))
-+
-+
-+def read_third_person_frame(rgb_annot):
-+    """Read a frame from the third-person camera annotator."""
-+    data = rgb_annot.get_data()
-+    if data is None or len(data) == 0:
-+        return None
-+    # data is RGBA (H, W, 4), take RGB
-+    frame = np.array(data)
-+    return to_uint8_rgb(frame)
-+
-+
-+def main():
-+    """Script to run an IsaacLab Arena environment with video saving."""
-+    args_parser = get_isaaclab_arena_cli_parser()
-+    args_parser.add_argument(
-+        "--video_output_dir",
-+        type=str,
-+        default="/home/ubuntu/DATA2/workspace/xmh/IsaacLab-Arena/output_videos",
-+        help="Directory to save output video",
-+    )
-+    args_parser.add_argument(
-+        "--save_third_person",
-+        action="store_true",
-+        default=False,
-+        help="Also save third-person and combined videos (slower in headless mode).",
-+    )
-+    args_cli, unknown = args_parser.parse_known_args()
-+
-+    with SimulationAppContext(args_cli):
-+        args_parser = setup_policy_argument_parser(args_parser)
-+        args_cli = args_parser.parse_args()
-+
-+        arena_builder = get_arena_builder_from_cli(args_cli)
-+        env = arena_builder.make_registered()
-+
-+        if args_cli.seed is not None:
-+            env.seed(args_cli.seed)
-+            torch.manual_seed(args_cli.seed)
-+            np.random.seed(args_cli.seed)
-+            random.seed(args_cli.seed)
-+
-+        obs, _ = env.reset()
-+
-+        # Create third-person camera only when explicitly requested.
-+        tp_camera = create_third_person_camera() if args_cli.save_third_person else None
-+
-+        policy, num_steps = create_policy(args_cli)
-+        from isaaclab_arena.metrics.metrics import compute_metrics
-+
-+        # Collect frames
-+        fp_frames = []  # first-person
-+        tp_frames = []  # third-person
-+        for step_i in tqdm.tqdm(range(num_steps)):
-+            with torch.inference_mode():
-+                actions = policy.get_action(env, obs)
-+                obs, _, terminated, truncated, _ = env.step(actions)
-+
-+                # First-person: from camera_obs
-+                if "camera_obs" in obs:
-+                    cam_keys = list(obs["camera_obs"].keys())
-+                    if cam_keys:
-+                        cam_img = obs["camera_obs"][cam_keys[0]]
-+                        frame = to_uint8_rgb(cam_img[0].cpu().numpy())
-+                        fp_frames.append(frame)
-+
-+                # Third-person: from replicator annotator
-+                if tp_camera is not None:
-+                    tp_annotator, tp_translate_op, tp_rotate_op, tp_follow_offset = tp_camera
-+                    robot_pos = _extract_robot_pos(obs, env)
-+                    if robot_pos is not None:
-+                        _update_third_person_camera(tp_translate_op, tp_rotate_op, robot_pos, tp_follow_offset)
-+                    tp_frame = read_third_person_frame(tp_annotator)
-+                    if tp_frame is not None:
-+                        tp_frames.append(tp_frame)
-+
-+                if terminated.any() or truncated.any():
-+                    env_ids = (terminated | truncated).nonzero().flatten()
-+                    policy.reset(env_ids=env_ids)
-+
-+        metrics = compute_metrics(env)
-+        print(f"Metrics: {metrics}")
-+
-+        # Save videos
-+        video_dir = args_cli.video_output_dir
-+        os.makedirs(video_dir, exist_ok=True)
-+
-+        if fp_frames:
-+            save_frames_to_video(fp_frames, os.path.join(video_dir, "g1_locomanip_first_person.mp4"))
-+        if tp_frames:
-+            save_frames_to_video(tp_frames, os.path.join(video_dir, "g1_locomanip_third_person.mp4"))
-+
-+        # Side-by-side video if both have same frame count
-+        if fp_frames and tp_frames:
-+            min_len = min(len(fp_frames), len(tp_frames))
-+            combined = []
-+            for i in range(min_len):
-+                fp = fp_frames[i]
-+                tp = tp_frames[i]
-+                # Resize tp to match fp height if needed
-+                if fp.shape[0] != tp.shape[0]:
-+                    from PIL import Image
-+                    tp = np.array(Image.fromarray(tp).resize((fp.shape[1], fp.shape[0])))
-+                combined.append(np.concatenate([fp, tp], axis=1))
-+            save_frames_to_video(combined, os.path.join(video_dir, "g1_locomanip_combined.mp4"))
-+
-+        env.close()
-+
-+
-+if __name__ == "__main__":
-+    main()
-diff --git a/docs/pages/example_workflows/locomanipulation/g1_wbc_pink_23d_action_parsing.rst b/docs/pages/example_workflows/locomanipulation/g1_wbc_pink_23d_action_parsing.rst
-new file mode 100644
-index 00000000..6e005bba
---- /dev/null
-+++ b/docs/pages/example_workflows/locomanipulation/g1_wbc_pink_23d_action_parsing.rst
-@@ -0,0 +1,118 @@
-+G1 WBC+PINK 23D Action Parsing
-+==============================
-+
-+This note explains how the 23-dimensional replay action is parsed by
-+``G1DecoupledWBCPinkAction`` and transformed into final 43-DoF joint targets.
-+
-+Scope
-+-----
-+
-+- Environment: ``galileo_g1_locomanip_pick_and_place``
-+- Embodiment: ``g1_wbc_pink``
-+- Policy mode: ``replay`` (actions are loaded from HDF5)
-+
-+Action Layout (23D)
-+-------------------
-+
-+Index mapping is defined in:
-+``isaaclab_arena_g1/g1_whole_body_controller/wbc_policy/policy/action_constants.py``.
-+
-+.. list-table::
-+   :widths: 20 20 60
-+   :header-rows: 1
-+
-+   * - Slice
-+     - Dim
-+     - Meaning
-+   * - ``[0]``
-+     - 1
-+     - ``left_hand_state`` (open/close)
-+   * - ``[1]``
-+     - 1
-+     - ``right_hand_state`` (open/close)
-+   * - ``[2:5]``
-+     - 3
-+     - left wrist position ``xyz``
-+   * - ``[5:9]``
-+     - 4
-+     - left wrist quaternion ``wxyz``
-+   * - ``[9:12]``
-+     - 3
-+     - right wrist position ``xyz``
-+   * - ``[12:16]``
-+     - 4
-+     - right wrist quaternion ``wxyz``
-+   * - ``[16:19]``
-+     - 3
-+     - navigation command ``(vx, vy, wz)``
-+   * - ``[19:20]``
-+     - 1
-+     - base height command
-+   * - ``[20:23]``
-+     - 3
-+     - torso orientation command ``(roll, pitch, yaw)``
-+
-+Execution Pipeline
-+------------------
-+
-+Main entry is:
-+``isaaclab_arena_g1/g1_env/mdp/actions/g1_decoupled_wbc_pink_action.py``.
-+
-+1. Receive replay action and cache raw action
-+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-+
-+``process_actions()`` stores ``self._raw_actions`` and works on a cloned tensor.
-+
-+2. Upper-body branch (PINK IK)
-+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-+
-+- Extract wrist targets and hand states from the 23D vector.
-+- Convert quaternion from Isaac format ``wxyz`` to SciPy format ``xyzw``.
-+- Build two 4x4 target transforms (left and right wrist).
-+- Run PINK IK via ``G1WBCUpperbodyController``:
-+
-+  - ``G1WBCUpperbodyController.inverse_kinematics(...)``
-+  - internally calls ``pink.solve_ik(...)`` in
-+    ``g1_wbc_upperbody_controller.py``
-+
-+- Output of this branch is a full-body ``q`` from IK, then only the upper-body
-+  joint subset is kept as ``target_upper_body_joints``.
-+
-+3. Lower-body branch (WBC)
-+^^^^^^^^^^^^^^^^^^^^^^^^^^
-+
-+- Extract:
-+
-+  - ``navigate_cmd`` from ``[16:19]``
-+  - ``base_height_cmd`` from ``[19:20]``
-+  - ``torso_orientation_rpy_cmd`` from ``[20:23]``
-+
-+- Set these into WBC goal via ``set_wbc_goal(...)``.
-+- Build WBC observation from simulator state using ``prepare_observations(...)``.
-+- Call ``self.wbc_policy.get_action(target_upper_body_joints)``.
-+
-+WBC policy is assembled in:
-+``isaaclab_arena_g1/g1_whole_body_controller/wbc_policy/policy/wbc_policy_factory.py``.
-+
-+- Upper-body policy: ``IdentityPolicy`` (pass-through of PINK result)
-+- Lower-body policy: ``G1HomiePolicyV2`` (stand/walk ONNX policy)
-+- Combined by ``G1DecoupledWholeBodyPolicy``
-+
-+4. Convert to simulator joint order and apply
-+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-+
-+- ``postprocess_actions(...)`` converts WBC output into simulator joint order.
-+- Result is ``self._processed_actions`` (43 DoF).
-+- ``apply_actions()`` sends it to:
-+  ``self._asset.set_joint_position_target(self._processed_actions, self._joint_ids)``.
-+
-+Replay Data Relation
-+--------------------
-+
-+With ``--policy_type replay``, the HDF5 ``actions`` tensor is loaded by
-+``ReplayActionPolicy`` and fed step-by-step into the action term above.
-+
-+Therefore, replay ``actions (23D)`` are **not** final motor commands.
-+They are high-level commands consumed by PINK+WBC and converted into
-+``processed_actions (43D)`` before actuation.
-+
