@@ -4,7 +4,7 @@ set -euo pipefail
 PACK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 HOI_PKL=${1:-"/path/to/human_object_results.pkl"}
-OUT_DIR=${2:-"/tmp/g1_bridge_run1"}
+OUT_DIR=${2:-"$PACK_ROOT/artifacts/g1_bridge_run1"}
 
 mkdir -p "$OUT_DIR"
 
