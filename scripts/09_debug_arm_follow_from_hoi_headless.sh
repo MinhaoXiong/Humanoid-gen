@@ -38,7 +38,8 @@ ALIGN_LAST_POS_W=${ALIGN_LAST_POS_W:-""}
 ALIGN_LAST_RAMP_SEC=${ALIGN_LAST_RAMP_SEC:-"1.0"}
 
 if [[ "$SCENE" == "kitchen_pick_and_place" ]]; then
-  BASE_POS_W=${BASE_POS_W:-"0.0,0.0,0.0"}
+  BASE_POS_W=${BASE_POS_W:-"0.05,0.0,0.0"}
+  G1_INIT_YAW_DEG=${G1_INIT_YAW_DEG:-"0.0"}
   TRJ_SCALE_XYZ=${TRJ_SCALE_XYZ:-"0.13,0.22,0.30"}
   ALIGN_FIRST_POS_W=${ALIGN_FIRST_POS_W:-"0.40,0.00,0.10"}
   CLIP_Z_MIN=${CLIP_Z_MIN:-"0.08"}
@@ -149,6 +150,10 @@ if [[ "$HEADLESS" != "0" ]]; then
     --object "$OBJECT"
     --embodiment g1_wbc_pink
   )
+fi
+
+if [[ "$SCENE" == "kitchen_pick_and_place" ]]; then
+  cmd_runner+=(--g1-init-pos-w "$BASE_POS_W" --g1-init-yaw-deg "$G1_INIT_YAW_DEG")
 fi
 
 cd "$ISAAC_ROOT"

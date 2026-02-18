@@ -16,6 +16,8 @@ export ISAAC_PYTHON=/home/ubuntu/miniconda3/envs/isaaclab_arena/bin/python
 export DEVICE=cuda:0
 export HOI_PKL=$PACK_ROOT/artifacts/hoifhli/human_object_results_compare_fine_01_p0_o3.pkl
 export HOI_ROOT=$PACK_ROOT/assets/hoifhli_release_min
+export BASE_POS_W=0.05,0.0,0.0
+export G1_INIT_YAW_DEG=0.0
 
 # 已经推送好的 HOIDiNi 结果（另一台机器无 HOIDiNi 环境时直接用）
 export HOIDINI_FINAL_PKL=$PACK_ROOT/artifacts/hoidini_kitchen_pickplace_run1/cphoi__cphoi_05011024_c15p100_v0__model000120000__0000__s10_alarmclock_lift_Retake__alarmclock__The_person_is_lifting_a_alarmclock__final.pickle
@@ -89,7 +91,8 @@ PY
 
 ```bash
 cd "$PACK_ROOT"
-DEVICE="$DEVICE" bash scripts/08_debug_arm_follow_gui.sh \
+DEVICE="$DEVICE" BASE_POS_W="$BASE_POS_W" G1_INIT_YAW_DEG="$G1_INIT_YAW_DEG" \
+bash scripts/08_debug_arm_follow_gui.sh \
   "$PACK_ROOT/artifacts/debug_schemeA2_gui" \
   lift_place \
   kitchen_pick_and_place \
@@ -101,6 +104,7 @@ DEVICE="$DEVICE" bash scripts/08_debug_arm_follow_gui.sh \
 ```bash
 cd "$PACK_ROOT"
 ISAAC_PYTHON="$ISAAC_PYTHON" DEVICE="$DEVICE" HEADLESS=0 \
+BASE_POS_W="$BASE_POS_W" G1_INIT_YAW_DEG="$G1_INIT_YAW_DEG" \
 bash scripts/09_debug_arm_follow_from_hoi_headless.sh \
   "$HOI_PKL" \
   "$PACK_ROOT/artifacts/debug_schemeA2_hoi_gui" \
@@ -177,3 +181,6 @@ bash scripts/09_debug_arm_follow_from_hoi_headless.sh \
 - 黑屏或无法创建窗口：检查当前会话是否有可用显示（`echo $DISPLAY`）。
 - GPU 不可用：先试 `DEVICE=cpu` 验证链路，再切回 `cuda:0`。
 - 物体飞天：优先看 `bridge_debug.json` 的 `result_min_w/result_max_w` 是否超出桌面范围。
+- 机器人离桌子太远：调 `BASE_POS_W`（并同步 `G1_INIT_YAW_DEG`），推荐先试：
+  - `BASE_POS_W=0.05,0.0,0.0`
+  - `BASE_POS_W=0.0,-0.15,0.0`

@@ -20,13 +20,16 @@ DEBUG_TRAJ_JSON="$OUT_DIR/debug_traj.json"
 DEBUG_REPLAY_JSON="$OUT_DIR/debug_replay.json"
 
 SCENE_PRESET="none"
-BASE_POS_W="0.0,0.0,0.0"
+BASE_POS_W=${BASE_POS_W:-""}
+G1_INIT_YAW_DEG=${G1_INIT_YAW_DEG:-"0.0"}
 if [[ "$SCENE" == "galileo_g1_locomanip_pick_and_place" ]]; then
   SCENE_PRESET="galileo_locomanip"
-  BASE_POS_W="0.0,0.18,0.0"
+  BASE_POS_W=${BASE_POS_W:-"0.0,0.18,0.0"}
 elif [[ "$SCENE" == "kitchen_pick_and_place" ]]; then
   SCENE_PRESET="kitchen_pick_and_place"
-  BASE_POS_W="0.0,0.0,0.0"
+  BASE_POS_W=${BASE_POS_W:-"0.05,0.0,0.0"}
+else
+  BASE_POS_W=${BASE_POS_W:-"0.0,0.0,0.0"}
 fi
 
 "$PYTHON" "$PACK_ROOT/isaac_replay/generate_debug_object_traj.py" \
@@ -47,16 +50,24 @@ fi
   --left-hand-state 0.0 \
   --right-hand-state 0.0
 
-cd "$ISAAC_ROOT"
-"$PYTHON" "$PACK_ROOT/isaac_replay/policy_runner_kinematic_object_replay.py" \
-  --device "$DEVICE" --enable_cameras \
-  --policy_type replay \
-  --replay_file_path "$REPLAY_HDF5" \
-  --episode_name demo_0 \
-  --kin-traj-path "$KIN_TRAJ_PATH" \
-  --kin-asset-name "$OBJECT" \
-  --kin-apply-timing pre_step \
-  --max-steps 408 \
-  "$SCENE" \
-  --object "$OBJECT" \
+cmd_runner=(
+  "$PYTHON" "$PACK_ROOT/isaac_replay/policy_runner_kinematic_object_replay.py"
+  --device "$DEVICE" --enable_cameras
+  --policy_type replay
+  --replay_file_path "$REPLAY_HDF5"
+  --episode_name demo_0
+  --kin-traj-path "$KIN_TRAJ_PATH"
+  --kin-asset-name "$OBJECT"
+  --kin-apply-timing pre_step
+  --max-steps 408
+  "$SCENE"
+  --object "$OBJECT"
   --embodiment g1_wbc_pink
+)
+
+if [[ "$SCENE" == "kitchen_pick_and_place" ]]; then
+  cmd_runner+=(--g1-init-pos-w "$BASE_POS_W" --g1-init-yaw-deg "$G1_INIT_YAW_DEG")
+fi
+
+cd "$ISAAC_ROOT"
+"${cmd_runner[@]}"

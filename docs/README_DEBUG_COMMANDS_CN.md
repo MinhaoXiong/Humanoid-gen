@@ -17,6 +17,8 @@ export PACK_ROOT=/home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
 export ISAAC_PYTHON=/home/ubuntu/miniconda3/envs/isaaclab_arena/bin/python
 export DEVICE=cpu
 export HOI_PKL=$PACK_ROOT/artifacts/hoifhli/human_object_results_compare_fine_01_p0_o3.pkl
+export BASE_POS_W=0.05,0.0,0.0
+export G1_INIT_YAW_DEG=0.0
 ```
 
 ## 1. 四步 Debug 主链路（Headless）
@@ -130,6 +132,7 @@ conda run -n isaaclab_arena python "$PACK_ROOT/isaac_replay/policy_runner_kinema
 ```bash
 cd "$PACK_ROOT"
 ISAAC_PYTHON="$ISAAC_PYTHON" DEVICE="$DEVICE" \
+BASE_POS_W="$BASE_POS_W" G1_INIT_YAW_DEG="$G1_INIT_YAW_DEG" \
 bash scripts/09_debug_arm_follow_from_hoi_headless.sh \
   "$HOI_PKL" \
   "$PACK_ROOT/artifacts/debug_schemeA2_hoi" \
