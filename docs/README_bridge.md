@@ -156,6 +156,7 @@ For the full chain starting from `hoifhli_release` and `BODex` commands (plus en
 2. 如果 A-2 稳定而 HOI 不稳定，优先排查 HOI 世界系对齐与尺度映射。
 3. A-2 默认场景环境定义文件：
    - `repos/IsaacLab-Arena/isaaclab_arena/examples/example_environments/kitchen_pick_and_place_environment.py`
+   - 已为 G1 显式设置初始位姿 `position_xyz=(0.0, 0.0, 0.0)`，并将物体初始位姿设为 `(0.4, 0.0, 0.1)`，确保机器人位于桌边可操作区域
 
 示例（GUI，非 headless）：
 
@@ -224,8 +225,8 @@ cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
   --output-debug-json artifacts/debug_schemeA2/debug_replay.json \
   --base-pos-w "0.0,0.0,0.0" \
   --base-yaw 0.0 \
-  --right-wrist-pos-obj "-0.20,-0.03,0.10" \
-  --right-wrist-quat-obj-wxyz "1.0,0.0,0.0,0.0"
+  --right-wrist-pos-obj=-0.20,-0.03,0.10 \
+  --right-wrist-quat-obj-wxyz=1.0,0.0,0.0,0.0
 ```
 
 3. 在 Isaac GUI 回放 A-2（桌面场景）：
@@ -395,8 +396,8 @@ cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
   --output-debug-json artifacts/debug_schemeA2/debug_replay.json \
   --base-pos-w "0.0,0.0,0.0" \
   --base-yaw 0.0 \
-  --right-wrist-pos-obj "-0.20,-0.03,0.10" \
-  --right-wrist-quat-obj-wxyz "1.0,0.0,0.0,0.0"
+  --right-wrist-pos-obj=-0.20,-0.03,0.10 \
+  --right-wrist-quat-obj-wxyz=1.0,0.0,0.0,0.0
 ```
 
 A-2 GUI 回放：

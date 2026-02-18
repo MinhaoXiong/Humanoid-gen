@@ -42,8 +42,8 @@ fi
   --output-debug-json "$DEBUG_REPLAY_JSON" \
   --base-pos-w "$BASE_POS_W" \
   --base-yaw 0.0 \
-  --right-wrist-pos-obj "-0.20,-0.03,0.10" \
-  --right-wrist-quat-obj-wxyz "1.0,0.0,0.0,0.0" \
+  --right-wrist-pos-obj=-0.20,-0.03,0.10 \
+  --right-wrist-quat-obj-wxyz=1.0,0.0,0.0,0.0 \
   --left-hand-state 0.0 \
   --right-hand-state 0.0
 

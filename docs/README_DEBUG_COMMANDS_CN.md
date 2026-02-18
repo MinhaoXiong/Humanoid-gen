@@ -1,0 +1,186 @@
+# Dual Debug 工作流命令手册（无 GUI 机器）
+
+本文把你要的命令集中到一个地方：
+- 四步 Debug 主链路
+- 方案 A（A-2：桌面场景 + 固定 pelvis + 手臂跟随）
+- 方案 B（HOI 轨迹约束）
+
+适用前提：本机没有图形化界面，所以统一使用 `--headless`。
+
+## 0. 环境变量
+
+```bash
+export PACK_ROOT=/home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
+export ISAAC_PYTHON=/home/ubuntu/miniconda3/envs/isaaclab_arena/bin/python
+export DEVICE=cpu
+export HOI_PKL=$PACK_ROOT/artifacts/hoifhli/human_object_results_compare_fine_01_p0_o3.pkl
+```
+
+## 1. 四步 Debug 主链路（Headless）
+
+### Step 1: 从 HOI pkl 构建基础 replay
+
+```bash
+cd "$PACK_ROOT"
+bash scripts/03_build_replay.sh \
+  "$HOI_PKL" \
+  "$PACK_ROOT/artifacts/debug4_run1"
+```
+
+产物：
+- `artifacts/debug4_run1/replay_actions.hdf5`
+- `artifacts/debug4_run1/object_kinematic_traj.npz`
+- `artifacts/debug4_run1/bridge_debug.json`
+
+### Step 2: 只看物体轨迹（object-only）
+
+```bash
+cd "$PACK_ROOT"
+ISAAC_PYTHON="$ISAAC_PYTHON" bash scripts/05_object_only_replay.sh \
+  "$PACK_ROOT/artifacts/debug4_run1" \
+  debug4_object_only \
+  "$PACK_ROOT/artifacts/videos"
+```
+
+### Step 3: 机器人 + 物体回放（policy replay）
+
+```bash
+cd "$PACK_ROOT"
+ISAAC_PYTHON="$ISAAC_PYTHON" bash scripts/04_isaac_replay_video.sh \
+  "$PACK_ROOT/artifacts/debug4_run1" \
+  debug4_full_replay \
+  "$PACK_ROOT/artifacts/videos"
+```
+
+### Step 4: 读 debug 元数据做快速判定
+
+```bash
+cd "$PACK_ROOT"
+python - <<'PY'
+import json
+p='artifacts/debug4_run1/bridge_debug.json'
+with open(p,'r',encoding='utf-8') as f:
+    d=json.load(f)
+print('stage_indices:', d.get('stage_indices', {}))
+print('action_shape:', d.get('outputs', {}).get('action_shape'))
+print('object_range_min_w:', d.get('object_world', {}).get('min_w'))
+print('object_range_max_w:', d.get('object_world', {}).get('max_w'))
+PY
+```
+
+## 2. 方案 A（A-2）命令
+
+目标：在桌面场景里固定 pelvis/base，只让手臂按物体轨迹跟随。
+
+### A-2.1 生成 synthetic 物体轨迹
+
+```bash
+cd "$PACK_ROOT"
+"$ISAAC_PYTHON" isaac_replay/generate_debug_object_traj.py \
+  --output "$PACK_ROOT/artifacts/acceptance_a2/object_kinematic_traj.npz" \
+  --output-debug-json "$PACK_ROOT/artifacts/acceptance_a2/debug_traj.json" \
+  --object-name cracker_box \
+  --pattern lift_place \
+  --scene-preset kitchen_pick_and_place \
+  --fps 50 --duration-sec 8.0
+```
+
+### A-2.2 生成 arm-follow replay（固定 pelvis）
+
+```bash
+cd "$PACK_ROOT"
+"$ISAAC_PYTHON" isaac_replay/build_arm_follow_replay.py \
+  --kin-traj-path "$PACK_ROOT/artifacts/acceptance_a2/object_kinematic_traj.npz" \
+  --output-hdf5 "$PACK_ROOT/artifacts/acceptance_a2/replay_actions_arm_follow.hdf5" \
+  --output-debug-json "$PACK_ROOT/artifacts/acceptance_a2/debug_replay.json" \
+  --base-pos-w "0.0,0.0,0.0" \
+  --base-yaw 0.0 \
+  --right-wrist-pos-obj=-0.20,-0.03,0.10 \
+  --right-wrist-quat-obj-wxyz=1.0,0.0,0.0,0.0
+```
+
+### A-2.3 Headless 验收回放
+
+```bash
+cd "$PACK_ROOT/repos/IsaacLab-Arena"
+conda run -n isaaclab_arena python "$PACK_ROOT/isaac_replay/policy_runner_kinematic_object_replay.py" \
+  --headless --device "$DEVICE" --enable_cameras \
+  --policy_type replay \
+  --replay_file_path "$PACK_ROOT/artifacts/acceptance_a2/replay_actions_arm_follow.hdf5" \
+  --episode_name demo_0 \
+  --kin-traj-path "$PACK_ROOT/artifacts/acceptance_a2/object_kinematic_traj.npz" \
+  --kin-asset-name cracker_box \
+  --kin-apply-timing pre_step \
+  --max-steps 120 \
+  kitchen_pick_and_place \
+  --object cracker_box \
+  --embodiment g1_wbc_pink
+```
+
+## 3. 方案 B 命令（约束 HOI 轨迹）
+
+### B.1 构建 constrained replay
+
+```bash
+cd "$PACK_ROOT"
+ISAAC_PYTHON="$ISAAC_PYTHON" bash scripts/07_build_replay_constrained.sh \
+  "$HOI_PKL" \
+  "$PACK_ROOT/artifacts/acceptance_b"
+```
+
+产物：
+- `artifacts/acceptance_b/replay_actions.hdf5`
+- `artifacts/acceptance_b/object_kinematic_traj.npz`
+- `artifacts/acceptance_b/bridge_debug.json`
+
+### B.2 优先命令（使用 HOI mesh）
+
+```bash
+cd "$PACK_ROOT/repos/IsaacLab-Arena"
+conda run -n isaaclab_arena python "$PACK_ROOT/isaac_replay/policy_runner_kinematic_object_replay.py" \
+  --headless --device "$DEVICE" --enable_cameras \
+  --policy_type replay \
+  --replay_file_path "$PACK_ROOT/artifacts/acceptance_b/replay_actions.hdf5" \
+  --episode_name demo_0 \
+  --kin-traj-path "$PACK_ROOT/artifacts/acceptance_b/object_kinematic_traj.npz" \
+  --kin-apply-timing pre_step \
+  --use-hoi-object \
+  --hoi-root "$PACK_ROOT/repos/hoifhli_release" \
+  --hoi-usd-cache-dir "$PACK_ROOT/artifacts/hoi_runtime_usd" \
+  --max-steps 120 \
+  galileo_g1_locomanip_pick_and_place \
+  --embodiment g1_wbc_pink
+```
+
+### B.3 如果 HOI mesh 缺失（例如 `smallbox`）的回退命令
+
+```bash
+cd "$PACK_ROOT/repos/IsaacLab-Arena"
+conda run -n isaaclab_arena python "$PACK_ROOT/isaac_replay/policy_runner_kinematic_object_replay.py" \
+  --headless --device "$DEVICE" --enable_cameras \
+  --policy_type replay \
+  --replay_file_path "$PACK_ROOT/artifacts/acceptance_b/replay_actions.hdf5" \
+  --episode_name demo_0 \
+  --kin-traj-path "$PACK_ROOT/artifacts/acceptance_b/object_kinematic_traj.npz" \
+  --kin-asset-name brown_box \
+  --kin-apply-timing pre_step \
+  --max-steps 120 \
+  galileo_g1_locomanip_pick_and_place \
+  --object brown_box \
+  --embodiment g1_wbc_pink
+```
+
+## 4. 这次已完成的验收记录
+
+- A-2 headless 验收：通过（`max-steps=120`，命令正常结束）。
+- B constrained 构建：通过（3 个核心产物已写出）。
+- B headless（`--use-hoi-object`）首次失败：`smallbox` mesh 缺失。
+- B headless 回退（场景内置 `brown_box`）：通过（`max-steps=120`）。
+
+## 5. 本次顺手修复的两个问题
+
+- 修复 `scripts/08_debug_arm_follow_gui.sh` 里负数参数传递问题：
+  - `--right-wrist-pos-obj=-0.20,-0.03,0.10`
+- 修复 `ReplayActionPolicy` 调用参数错位：
+  - 文件：`repos/IsaacLab-Arena/isaaclab_arena/examples/policy_runner_cli.py`
+  - 由位置参数改为关键字参数，避免把 `episode_name` 误传成 `device`。
