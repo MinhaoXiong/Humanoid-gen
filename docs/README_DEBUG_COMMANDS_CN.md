@@ -117,6 +117,42 @@ conda run -n isaaclab_arena python "$PACK_ROOT/isaac_replay/policy_runner_kinema
   --embodiment g1_wbc_pink
 ```
 
+### A-HOI：把 A 的物体轨迹来源替换为 HOIFHI（带场景约束）
+
+说明：
+- 这是 A-2 的扩展链路：控制侧仍是“固定 pelvis + 手臂跟随”；
+- 轨迹侧改为 HOIFHI `human_object_results.pkl`；
+- 默认会按 `kitchen_pick_and_place` 桌面尺寸做缩放+对齐+裁剪。
+
+```bash
+cd "$PACK_ROOT"
+ISAAC_PYTHON="$ISAAC_PYTHON" DEVICE="$DEVICE" \
+bash scripts/09_debug_arm_follow_from_hoi_headless.sh \
+  "$HOI_PKL" \
+  "$PACK_ROOT/artifacts/debug_schemeA2_hoi" \
+  kitchen_pick_and_place \
+  cracker_box
+```
+
+关键默认参数（kitchen）：
+- `TRJ_SCALE_XYZ="0.13,0.22,0.30"`
+- `ALIGN_FIRST_POS_W="0.40,0.00,0.10"`
+- `CLIP_Z_MIN=0.08`、`CLIP_Z_MAX=0.38`
+- `CLIP_XY_MIN="0.05,-0.45"`、`CLIP_XY_MAX="0.65,0.45"`
+
+可按场景覆盖（示例）：
+```bash
+cd "$PACK_ROOT"
+TRJ_SCALE_XYZ="0.12,0.18,0.28" \
+CLIP_XY_MAX="0.62,0.40" \
+MAX_STEPS=150 \
+bash scripts/09_debug_arm_follow_from_hoi_headless.sh \
+  "$HOI_PKL" \
+  "$PACK_ROOT/artifacts/debug_schemeA2_hoi_tuned" \
+  kitchen_pick_and_place \
+  cracker_box
+```
+
 ## 3. 方案 B 命令（约束 HOI 轨迹）
 
 ### B.1 构建 constrained replay

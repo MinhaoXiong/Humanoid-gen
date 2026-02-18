@@ -167,6 +167,51 @@ cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
   lift_place kitchen_pick_and_place cracker_box
 ```
 
+### 8.1 A-HOI 扩展：A 方案直接接 HOIFHI 物体轨迹
+
+目标：
+- 保留 A-2 的“固定 pelvis + 手臂跟随物体”控制链路；
+- 仅替换物体轨迹来源：从 synthetic 改为 HOIFHI `human_object_results.pkl`；
+- 在导入 Isaac 场景前，对 HOI 轨迹做场景尺寸约束重映射。
+
+已实现：
+- `scripts/09_debug_arm_follow_from_hoi_headless.sh`
+  - `HOI pkl -> 约束轨迹(npz) -> arm-follow replay(hdf5) -> headless replay`
+  - 默认场景 `kitchen_pick_and_place`
+  - 默认会覆写输出 `object_name` 为你选定的 Isaac 资产名（如 `cracker_box`）
+
+为什么必须约束（以当前 HOI 样例为例）：
+- `object_name=smallbox`
+- 帧数：`245`
+- 原始范围（world）：
+  - `x: [-1.464, 0.351]`（跨度约 `1.816m`）
+  - `y: [-5.059, -3.320]`（跨度约 `1.739m`）
+  - `z: [0.080, 0.933]`（跨度约 `0.853m`）
+- 这个尺度直接放进厨房桌面场景会越界，所以 A-HOI 默认对 kitchen 采用：
+  - `--traj-scale-xyz "0.13,0.22,0.30"`
+  - `--align-first-pos-w "0.40,0.00,0.10"`
+  - `--clip-z-min 0.08 --clip-z-max 0.38`
+  - `--clip-xy-min "0.05,-0.45" --clip-xy-max "0.65,0.45"`
+
+一键命令（无 GUI，推荐）：
+
+```bash
+cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
+ISAAC_PYTHON=/home/ubuntu/miniconda3/envs/isaaclab_arena/bin/python \
+DEVICE=cpu \
+bash scripts/09_debug_arm_follow_from_hoi_headless.sh \
+  /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/artifacts/hoifhli/human_object_results_compare_fine_01_p0_o3.pkl \
+  /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/artifacts/debug_schemeA2_hoi \
+  kitchen_pick_and_place \
+  cracker_box
+```
+
+可调参数（通过环境变量覆盖）：
+- `TRJ_SCALE_XYZ`、`TRJ_OFFSET_W`
+- `ALIGN_FIRST_POS_W`、`ALIGN_LAST_POS_W`、`ALIGN_LAST_RAMP_SEC`
+- `CLIP_Z_MIN`、`CLIP_Z_MAX`、`CLIP_XY_MIN`、`CLIP_XY_MAX`
+- `BASE_POS_W`、`MAX_STEPS`、`DEVICE`、`HEADLESS`
+
 ## 9. 调试方案 B（对 HOI 轨迹加场景约束）
 
 目标：
@@ -363,6 +408,18 @@ cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
 ./scripts/08_debug_arm_follow_gui.sh \
   /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/artifacts/debug_schemeA2 \
   lift_place kitchen_pick_and_place cracker_box
+```
+
+方案 A-HOI（Headless，HOIFHI 轨迹 + 场景约束 + arm-follow）：
+```bash
+cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
+ISAAC_PYTHON=/home/ubuntu/miniconda3/envs/isaaclab_arena/bin/python \
+DEVICE=cpu \
+./scripts/09_debug_arm_follow_from_hoi_headless.sh \
+  /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/artifacts/hoifhli/human_object_results_compare_fine_01_p0_o3.pkl \
+  /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/artifacts/debug_schemeA2_hoi \
+  kitchen_pick_and_place \
+  cracker_box
 ```
 
 方案 B（构建约束 replay）：
