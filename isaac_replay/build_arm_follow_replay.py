@@ -149,6 +149,17 @@ def _make_parser() -> argparse.ArgumentParser:
         default="0.70710678,0.0,-0.70710678,0.0",
         help="Right wrist target in object frame quat.",
     )
+    parser.add_argument(
+        "--right-wrist-quat-control",
+        choices=["follow_object", "constant_pelvis"],
+        default="follow_object",
+        help="How to generate right wrist orientation command.",
+    )
+    parser.add_argument(
+        "--right-wrist-quat-pelvis-wxyz",
+        default="1.0,0.0,0.0,0.0",
+        help="Constant right wrist quat command in pelvis frame (used when right-wrist-quat-control=constant_pelvis).",
+    )
     return parser
 
 
@@ -168,6 +179,9 @@ def main() -> None:
     right_wrist_pos_obj = _parse_csv_floats(args.right_wrist_pos_obj, 3, "right_wrist_pos_obj")
     right_wrist_quat_obj = _normalize_quat_wxyz(
         _parse_csv_floats(args.right_wrist_quat_obj_wxyz, 4, "right_wrist_quat_obj_wxyz")
+    )
+    right_wrist_quat_pelvis_const = _normalize_quat_wxyz(
+        _parse_csv_floats(args.right_wrist_quat_pelvis_wxyz, 4, "right_wrist_quat_pelvis_wxyz")
     )
     base_pos_w = _parse_csv_floats(args.base_pos_w, 3, "base_pos_w")
     torso_rpy = _parse_csv_floats(args.torso_rpy, 3, "torso_rpy")
@@ -189,9 +203,12 @@ def main() -> None:
         p_hand_w = t_hand_w[:3, 3]
         r_hand_w = t_hand_w[:3, :3]
         p_hand_pelvis = r_base_w.T @ (p_hand_w - base_pos_w)
-        r_hand_pelvis = r_base_w.T @ r_hand_w
         right_wrist_pos_pelvis[i] = p_hand_pelvis
-        right_wrist_quat_pelvis[i] = _rotmat_to_quat_wxyz(r_hand_pelvis)
+        if args.right_wrist_quat_control == "constant_pelvis":
+            right_wrist_quat_pelvis[i] = right_wrist_quat_pelvis_const
+        else:
+            r_hand_pelvis = r_base_w.T @ r_hand_w
+            right_wrist_quat_pelvis[i] = _rotmat_to_quat_wxyz(r_hand_pelvis)
 
     actions = np.zeros((n, ACTION_DIM), dtype=np.float32)
     actions[:, LEFT_HAND_STATE_IDX] = np.float32(args.left_hand_state)
@@ -223,6 +240,8 @@ def main() -> None:
             "base_yaw": float(args.base_yaw),
             "right_wrist_pos_obj": right_wrist_pos_obj.tolist(),
             "right_wrist_quat_obj_wxyz": right_wrist_quat_obj.tolist(),
+            "right_wrist_quat_control": args.right_wrist_quat_control,
+            "right_wrist_quat_pelvis_wxyz": right_wrist_quat_pelvis_const.tolist(),
         },
         "sanity": {
             "right_wrist_pos_pelvis_min": right_wrist_pos_pelvis.min(axis=0).tolist(),

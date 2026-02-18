@@ -41,6 +41,8 @@ if [[ "$SCENE" == "kitchen_pick_and_place" ]]; then
   BASE_POS_W=${BASE_POS_W:-"0.05,0.0,0.0"}
   G1_INIT_YAW_DEG=${G1_INIT_YAW_DEG:-"0.0"}
   RIGHT_WRIST_QUAT_OBJ_WXYZ=${RIGHT_WRIST_QUAT_OBJ_WXYZ:-"0.70710678,0.0,-0.70710678,0.0"}
+  RIGHT_WRIST_QUAT_CONTROL=${RIGHT_WRIST_QUAT_CONTROL:-"constant_pelvis"}
+  RIGHT_WRIST_QUAT_PELVIS_WXYZ=${RIGHT_WRIST_QUAT_PELVIS_WXYZ:-"1.0,0.0,0.0,0.0"}
   TRJ_SCALE_XYZ=${TRJ_SCALE_XYZ:-"0.13,0.22,0.30"}
   ALIGN_FIRST_POS_W=${ALIGN_FIRST_POS_W:-"0.40,0.00,0.10"}
   CLIP_Z_MIN=${CLIP_Z_MIN:-"0.08"}
@@ -50,6 +52,8 @@ if [[ "$SCENE" == "kitchen_pick_and_place" ]]; then
 elif [[ "$SCENE" == "galileo_g1_locomanip_pick_and_place" ]]; then
   BASE_POS_W=${BASE_POS_W:-"0.0,0.18,0.0"}
   RIGHT_WRIST_QUAT_OBJ_WXYZ=${RIGHT_WRIST_QUAT_OBJ_WXYZ:-"0.70710678,0.0,-0.70710678,0.0"}
+  RIGHT_WRIST_QUAT_CONTROL=${RIGHT_WRIST_QUAT_CONTROL:-"constant_pelvis"}
+  RIGHT_WRIST_QUAT_PELVIS_WXYZ=${RIGHT_WRIST_QUAT_PELVIS_WXYZ:-"1.0,0.0,0.0,0.0"}
   TRJ_SCALE_XYZ=${TRJ_SCALE_XYZ:-"1.0,1.0,1.0"}
   ALIGN_FIRST_POS_W=${ALIGN_FIRST_POS_W:-"0.5785,0.18,0.0707"}
   CLIP_Z_MIN=${CLIP_Z_MIN:-"0.06"}
@@ -59,6 +63,8 @@ elif [[ "$SCENE" == "galileo_g1_locomanip_pick_and_place" ]]; then
 else
   BASE_POS_W=${BASE_POS_W:-"0.0,0.0,0.0"}
   RIGHT_WRIST_QUAT_OBJ_WXYZ=${RIGHT_WRIST_QUAT_OBJ_WXYZ:-"0.70710678,0.0,-0.70710678,0.0"}
+  RIGHT_WRIST_QUAT_CONTROL=${RIGHT_WRIST_QUAT_CONTROL:-"constant_pelvis"}
+  RIGHT_WRIST_QUAT_PELVIS_WXYZ=${RIGHT_WRIST_QUAT_PELVIS_WXYZ:-"1.0,0.0,0.0,0.0"}
   TRJ_SCALE_XYZ=${TRJ_SCALE_XYZ:-"1.0,1.0,1.0"}
   ALIGN_FIRST_POS_W=${ALIGN_FIRST_POS_W:-""}
   CLIP_Z_MIN=${CLIP_Z_MIN:-""}
@@ -110,6 +116,8 @@ fi
   --base-yaw 0.0 \
   --right-wrist-pos-obj=-0.20,-0.03,0.10 \
   --right-wrist-quat-obj-wxyz="$RIGHT_WRIST_QUAT_OBJ_WXYZ" \
+  --right-wrist-quat-control "$RIGHT_WRIST_QUAT_CONTROL" \
+  --right-wrist-quat-pelvis-wxyz "$RIGHT_WRIST_QUAT_PELVIS_WXYZ" \
   --left-hand-state 0.0 \
   --right-hand-state 0.0
 

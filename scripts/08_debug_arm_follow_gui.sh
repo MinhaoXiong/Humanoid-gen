@@ -23,6 +23,8 @@ SCENE_PRESET="none"
 BASE_POS_W=${BASE_POS_W:-""}
 G1_INIT_YAW_DEG=${G1_INIT_YAW_DEG:-"0.0"}
 RIGHT_WRIST_QUAT_OBJ_WXYZ=${RIGHT_WRIST_QUAT_OBJ_WXYZ:-"0.70710678,0.0,-0.70710678,0.0"}
+RIGHT_WRIST_QUAT_CONTROL=${RIGHT_WRIST_QUAT_CONTROL:-"constant_pelvis"}
+RIGHT_WRIST_QUAT_PELVIS_WXYZ=${RIGHT_WRIST_QUAT_PELVIS_WXYZ:-"1.0,0.0,0.0,0.0"}
 if [[ "$SCENE" == "galileo_g1_locomanip_pick_and_place" ]]; then
   SCENE_PRESET="galileo_locomanip"
   BASE_POS_W=${BASE_POS_W:-"0.0,0.18,0.0"}
@@ -48,6 +50,8 @@ fi
   --base-yaw 0.0 \
   --right-wrist-pos-obj=-0.20,-0.03,0.10 \
   --right-wrist-quat-obj-wxyz="$RIGHT_WRIST_QUAT_OBJ_WXYZ" \
+  --right-wrist-quat-control "$RIGHT_WRIST_QUAT_CONTROL" \
+  --right-wrist-quat-pelvis-wxyz "$RIGHT_WRIST_QUAT_PELVIS_WXYZ" \
   --left-hand-state 0.0 \
   --right-hand-state 0.0
 
