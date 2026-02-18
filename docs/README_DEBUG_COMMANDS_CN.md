@@ -7,6 +7,9 @@
 
 适用前提：本机没有图形化界面，所以统一使用 `--headless`。
 
+如果你在有图形化界面的机器上运行，请使用：
+- `docs/README_DEBUG_COMMANDS_GUI_CN.md`
+
 ## 0. 环境变量
 
 ```bash
