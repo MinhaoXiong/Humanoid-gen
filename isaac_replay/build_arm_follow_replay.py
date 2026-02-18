@@ -146,7 +146,7 @@ def _make_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--right-wrist-quat-obj-wxyz",
-        default="1.0,0.0,0.0,0.0",
+        default="0.70710678,0.0,-0.70710678,0.0",
         help="Right wrist target in object frame quat.",
     )
     return parser
