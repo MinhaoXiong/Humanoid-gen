@@ -169,3 +169,91 @@ A-HOI 保留 A-2 控制链路，仅替换物体轨迹来源：
 - HOIDiNi 的接入工作本质是“新增一个输入适配层”；
 - 一旦适配层做好，后续调参可完全复用 `09` 脚本与现有验收流程。
 
+---
+
+## 10. 本次已实现的 HOIDiNi 适配脚本
+
+新增脚本：
+- `scripts/10_convert_hoidini_final_to_bridge_pkl.py`
+  - 输入：`*final.pickle`
+  - 读取：`smpldata.trans_obj`、`smpldata.poses_obj`（axis-angle）
+  - 转换：`axis-angle -> rotmat`
+  - 输出：bridge 可读的最小 pkl（`obj_pos`、`obj_rot_mat`、`object_name`）
+- `scripts/11_debug_arm_follow_from_hoidini_headless.sh`
+  - 一键链路：`HOIDiNi final -> 转换 -> A-HOI 约束 -> arm-follow -> Isaac headless replay`
+  - 默认 `HOI_FPS=20`（匹配 HOIDiNi 训练 fps）
+
+---
+
+## 11. 本次实跑记录（厨房场景）
+
+### 11.1 生成的 HOIDiNi 文本（motion 文本）
+- `The person is lifting a alarmclock.`
+
+### 11.2 实际产物路径
+- HOIDiNi 生成结果目录：`artifacts/hoidini_kitchen_pickplace_run1`
+- 关键文件：
+  - `cphoi__...__final.pickle`
+  - `sampling_cphoi.yaml`
+  - `..._vis.blend`
+
+### 11.3 A-2 厨房适配验收目录
+- `artifacts/acceptance_a2_hoidini`
+- 核心产物：
+  - `hoidini_bridge_input.pkl`
+  - `object_kinematic_traj.npz`
+  - `replay_actions_arm_follow.hdf5`
+  - `hoidini_convert_debug.json`
+  - `bridge_debug.json`
+  - `debug_replay.json`
+
+### 11.4 关键验收指标（本次结果）
+- `source_object_name -> output_object_name`：`alarmclock -> cracker_box`
+- 源帧数：`115`（HOIDiNi）
+- 目标回放帧数：`286`（20fps 重采样到 50fps）
+- `debug_replay.json`：`nav_cmd_abs_max = [0.0, 0.0, 0.0]`（pelvis 固定）
+- `bridge_debug.json` 约束后范围：
+  - `result_min_w = [0.3835, -0.0158, 0.0824]`
+  - `result_max_w = [0.4116, 0.0489, 0.2054]`
+
+---
+
+## 12. 复现实跑命令（逐步）
+
+### 12.1 在 HOIDiNi 里生成厨房 final（no-DNO 稳定版）
+```bash
+cd /home/ubuntu/DATA2/workspace/xmh/HOIDiNi
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY
+export PYTHONPATH=/home/ubuntu/DATA2/workspace/xmh/HOIDiNi/hoidini:$PYTHONPATH
+export TMP_DIR=/home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/artifacts/hoidini_tmp
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+
+conda run -n hoidini python hoidini/cphoi/cphoi_inference.py \
+  --config-path /tmp \
+  --config-name sampling_cphoi_kitchen_local_nodno
+```
+
+### 12.2 一键走 A-2 厨房适配链路（推荐）
+```bash
+cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
+ISAAC_PYTHON=/home/ubuntu/miniconda3/envs/isaaclab_arena/bin/python \
+DEVICE=cpu \
+HEADLESS=1 \
+MAX_STEPS=60 \
+bash scripts/11_debug_arm_follow_from_hoidini_headless.sh \
+  artifacts/hoidini_kitchen_pickplace_run1/cphoi__cphoi_05011024_c15p100_v0__model000120000__0000__s10_alarmclock_lift_Retake__alarmclock__The_person_is_lifting_a_alarmclock__final.pickle \
+  artifacts/acceptance_a2_hoidini \
+  kitchen_pick_and_place \
+  cracker_box
+```
+
+### 12.3 仅做格式转换（不跑 Isaac）
+```bash
+cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
+python3 scripts/10_convert_hoidini_final_to_bridge_pkl.py \
+  --hoidini-final-pickle artifacts/hoidini_kitchen_pickplace_run1/cphoi__cphoi_05011024_c15p100_v0__model000120000__0000__s10_alarmclock_lift_Retake__alarmclock__The_person_is_lifting_a_alarmclock__final.pickle \
+  --output-pickle artifacts/hoidini_kitchen_pickplace_run1/bridge_input_alarmclock.pkl \
+  --output-debug-json artifacts/hoidini_kitchen_pickplace_run1/bridge_input_alarmclock_debug.json \
+  --object-name-override cracker_box
+```

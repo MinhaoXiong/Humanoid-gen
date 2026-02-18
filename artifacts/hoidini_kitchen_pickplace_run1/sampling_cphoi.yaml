@@ -1,0 +1,110 @@
+_target_: hoidini.cphoi.CPHOIInferenceConfig
+seed: 42
+model_path: /home/ubuntu/DATA2/workspace/xmh/HOIDiNi/hoidini_data/models/cphoi_05011024_c15p100_v0/model000120000.pt
+out_dir: /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/artifacts/hoidini_kitchen_pickplace_run1
+batch_size_gen: 1
+device: 0
+sampler_config:
+  _target_: hoidini.cphoi.samplers.samplers_simple.KitchenSamplerSimple
+  grab_seq_id: s10/alarmclock_lift_Retake
+  surface_name: island
+guidance_param: 3.0
+n_simplify_object: 1200
+th_contact_force: 0.4
+n_simplify_hands: 1200
+one_phase_experiment: false
+dno_options_phase1:
+  _target_: hoidini.optimize_latent.dno.DNOOptions
+  num_opt_steps: 40
+  lr: 0.9
+  lr_warm_up_steps: 20
+  perturb_scale: 1.0e-06
+  diff_penalty_scale: 1.0e-06
+dno_loss_coefficients_phase1:
+  keep_object_static: 0.9
+  above_table: 1.2
+  similar_6dof_1: 0.5
+  similar_6dof_2: 0.5
+dno_options_phase2:
+  _target_: hoidini.optimize_latent.dno.DNOOptions
+  num_opt_steps: 40
+  lr: 0.9
+  lr_warm_up_steps: 20
+  perturb_scale: 1.0e-05
+  diff_penalty_scale: 1.0e-06
+  decorrelate_scale: 10
+dno_loss_coefficients_phase2:
+  contact: 0.95
+  penetration: 0.05
+  jitter_joints: 8.0e-05
+  above_table: 0.2
+  side_table: 0.2
+  foot_skate: 0.5
+use_dno_object: false
+use_dno_body: false
+anim_setup: NO_MESH
+result_phases_to_animate: []
+result_phases_to_save:
+- final
+anim_save_every_n_gens: 100000
+use_classifier_guidance: false
+classifier_guidance_n_steps: null
+classifier_guidance_lr_factor: null
+output_dir: null
+n_frames: null
+grab_dataset_path: /home/ubuntu/DATA2/workspace/xmh/HOIDiNi/hoidini_data/datasets/GRAB_RETARGETED_compressed
+autoregressive_include_prefix: true
+save_result_pickle: true
+store_loss_data: false
+replace_cps_with_nearest_neighbors: false
+experiment_dir: /home/ubuntu/DATA2/workspace/xmh/HOIDiNi/hoidini_data/models/cphoi_05011024_c15p100_v0
+train:
+  adam_beta2: 0.999
+  autoregressive_include_prefix: false
+  avg_model_beta: 0.9999
+  batch_size: 64
+  cond_mask_prob: 0.1
+  context_len: 15
+  data_load_lim: null
+  dataset: ''
+  debug_mode: false
+  device: 0
+  diffusion_steps: 8
+  eval_during_training: false
+  feature_names: cphoi
+  fps: 20
+  gen_during_training: false
+  grab_dataset_path: /home/ubuntu/DATA2/workspace/xmh/HOIDiNi/hoidini_data/datasets/GRAB_RETARGETED_compressed
+  guidance_param: 7.5
+  keyframe_cond_type: ''
+  lambda_fc: 0.0
+  lambda_rcxyz: 0.0
+  lambda_target_loc: 0.0
+  lambda_vel: 0.0
+  layers: 8
+  log_interval: 1000
+  lr: 0.0001
+  lr_anneal_steps: 0
+  mask_frames: true
+  multi_target_cond: false
+  noise_schedule: cosine
+  num_steps: 200000
+  overwrite: false
+  pcd_augment_jitter: true
+  pcd_augment_rot_z: true
+  pcd_n_points: 512
+  pred_len: 100
+  resume_checkpoint: ''
+  save_dir: /home/ubuntu/DATA2/workspace/xmh/HOIDiNi/hoidini_data/models/cphoi_05011024_c15p100_v0
+  save_interval: 20000
+  seed: 42
+  sigma_small: true
+  spatial_condition: null
+  train_platform_type: WandBPlatform
+  unconstrained: false
+  use_ema: true
+  wandb_project: cphoi
+  weight_decay: 0.0
+  zero_prefix_prob: 0.0
+  experiment_dir: /home/ubuntu/DATA2/workspace/xmh/HOIDiNi/hoidini_data/models/cphoi_05011024_c15p100_v0
+  model_path: /home/ubuntu/DATA2/workspace/xmh/HOIDiNi/hoidini_data/models/cphoi_05011024_c15p100_v0/model000120000.pt

@@ -1,0 +1,18 @@
+{
+  "input_final_pickle": "/home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/artifacts/hoidini_kitchen_pickplace_run1/cphoi__cphoi_05011024_c15p100_v0__model000120000__0000__s10_alarmclock_lift_Retake__alarmclock__The_person_is_lifting_a_alarmclock__final.pickle",
+  "output_bridge_pickle": "/home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/artifacts/hoidini_kitchen_pickplace_run1/bridge_input_alarmclock.pkl",
+  "source_object_name": "alarmclock",
+  "output_object_name": "cracker_box",
+  "text": "The person is lifting a alarmclock.",
+  "frames": 115,
+  "source_pos_min": [
+    -0.12938685715198517,
+    -0.11256808042526245,
+    0.98051518201828
+  ],
+  "source_pos_max": [
+    0.0872405394911766,
+    0.18191395699977875,
+    1.3904564380645752
+  ]
+}

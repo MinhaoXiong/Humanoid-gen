@@ -206,6 +206,51 @@ conda run -n isaaclab_arena python "$PACK_ROOT/isaac_replay/policy_runner_kinema
   --embodiment g1_wbc_pink
 ```
 
+## 3.5 HOIDiNi -> A-2 厨房链路（新增）
+
+目标：
+- 直接使用 HOIDiNi 生成的 `final.pickle`；
+- 经过适配器转换成 bridge 输入；
+- 在 `kitchen_pick_and_place` 执行 A-2（固定 pelvis + 手臂跟随）。
+
+### 3.5.1 先跑 HOIDiNi 生成（示例：本机 no-DNO 厨房配置）
+
+```bash
+cd /home/ubuntu/DATA2/workspace/xmh/HOIDiNi
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY
+export PYTHONPATH=/home/ubuntu/DATA2/workspace/xmh/HOIDiNi/hoidini:$PYTHONPATH
+export TMP_DIR=/home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/artifacts/hoidini_tmp
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+
+conda run -n hoidini python hoidini/cphoi/cphoi_inference.py \
+  --config-path /tmp \
+  --config-name sampling_cphoi_kitchen_local_nodno
+```
+
+### 3.5.2 一键转换 + A-2 厨房 headless 回放
+
+```bash
+cd "$PACK_ROOT"
+ISAAC_PYTHON="$ISAAC_PYTHON" DEVICE=cpu HEADLESS=1 MAX_STEPS=60 \
+bash scripts/11_debug_arm_follow_from_hoidini_headless.sh \
+  "$PACK_ROOT/artifacts/hoidini_kitchen_pickplace_run1/cphoi__cphoi_05011024_c15p100_v0__model000120000__0000__s10_alarmclock_lift_Retake__alarmclock__The_person_is_lifting_a_alarmclock__final.pickle" \
+  "$PACK_ROOT/artifacts/acceptance_a2_hoidini" \
+  kitchen_pick_and_place \
+  cracker_box
+```
+
+### 3.5.3 仅做转换（不启动 Isaac）
+
+```bash
+cd "$PACK_ROOT"
+python3 scripts/10_convert_hoidini_final_to_bridge_pkl.py \
+  --hoidini-final-pickle "$PACK_ROOT/artifacts/hoidini_kitchen_pickplace_run1/cphoi__cphoi_05011024_c15p100_v0__model000120000__0000__s10_alarmclock_lift_Retake__alarmclock__The_person_is_lifting_a_alarmclock__final.pickle" \
+  --output-pickle "$PACK_ROOT/artifacts/hoidini_kitchen_pickplace_run1/bridge_input_alarmclock.pkl" \
+  --output-debug-json "$PACK_ROOT/artifacts/hoidini_kitchen_pickplace_run1/bridge_input_alarmclock_debug.json" \
+  --object-name-override cracker_box
+```
+
 ## 4. 这次已完成的验收记录
 
 - A-2 headless 验收：通过（`max-steps=120`，命令正常结束）。
