@@ -8,6 +8,10 @@ This folder contains a minimal bridge for your selected **Path A**:
 - Grasp: single right hand first, left hand fixed
 - Priority: object trajectory fidelity first, then contact realism
 
+Chinese deep-dive docs:
+- `docs/README_DEBUG_COMMANDS_CN.md` (headless command handbook)
+- `docs/A2_HOIDINI_INTEGRATION_CN.md` (A-2/A-HOI details + HOIDiNi feasibility analysis)
+
 ## 1. What is implemented
 
 ### `build_replay.py`
