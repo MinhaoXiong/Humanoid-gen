@@ -13,7 +13,7 @@ ISAAC_ROOT="$PACK_ROOT/repos/IsaacLab-Arena"
 PYTHON="${ISAAC_PYTHON:-$(command -v python3)}"
 
 cd "$ISAAC_ROOT"
-"$PYTHON" isaaclab_arena/examples/policy_runner_kinematic_object_replay.py \
+"$PYTHON" "$PACK_ROOT/isaac_replay/policy_runner_kinematic_object_replay.py" \
   --headless --device cpu --enable_cameras \
   --policy_type replay \
   --replay_file_path "$OUT_DIR/replay_actions.hdf5" \

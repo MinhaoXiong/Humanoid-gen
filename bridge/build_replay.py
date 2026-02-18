@@ -52,6 +52,15 @@ def _parse_csv_floats(text: str, expected_len: int, name: str) -> np.ndarray:
     return np.asarray(values, dtype=np.float64)
 
 
+def _parse_optional_csv_floats(text: str | None, expected_len: int, name: str) -> np.ndarray | None:
+    if text is None:
+        return None
+    trimmed = text.strip()
+    if not trimmed or trimmed.lower() in {"none", "null"}:
+        return None
+    return _parse_csv_floats(trimmed, expected_len, name)
+
+
 def _to_numpy(x: Any) -> np.ndarray:
     if isinstance(x, np.ndarray):
         return x
@@ -381,6 +390,94 @@ def _build_base_plan_from_object(
     return np.stack([base_xy[:, 0], base_xy[:, 1], np.zeros(n), base_yaw], axis=1), nav_cmd
 
 
+def _apply_object_traj_constraints(
+    obj_pos_w: np.ndarray,
+    target_fps: float,
+    scale_xyz: np.ndarray,
+    offset_w: np.ndarray,
+    align_first_pos_w: np.ndarray | None,
+    align_last_pos_w: np.ndarray | None,
+    align_last_ramp_sec: float,
+    clip_z_min: float | None,
+    clip_z_max: float | None,
+    clip_xy_min: np.ndarray | None,
+    clip_xy_max: np.ndarray | None,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    out = obj_pos_w.copy()
+    ops: list[dict[str, Any]] = []
+
+    if clip_z_min is not None and clip_z_max is not None and clip_z_min > clip_z_max:
+        raise ValueError(f"clip_z_min {clip_z_min} cannot be greater than clip_z_max {clip_z_max}")
+    if clip_xy_min is not None and clip_xy_max is not None:
+        if np.any(clip_xy_min > clip_xy_max):
+            raise ValueError(f"clip_xy_min {clip_xy_min.tolist()} cannot be greater than clip_xy_max {clip_xy_max.tolist()}")
+
+    if not np.allclose(scale_xyz, np.ones(3), atol=1e-12):
+        anchor = out[0].copy()
+        out = (out - anchor[None, :]) * scale_xyz[None, :] + anchor[None, :]
+        ops.append({"type": "scale_xyz", "value": scale_xyz.tolist(), "anchor_w": anchor.tolist()})
+
+    if not np.allclose(offset_w, np.zeros(3), atol=1e-12):
+        out += offset_w[None, :]
+        ops.append({"type": "offset_w", "value": offset_w.tolist()})
+
+    if align_first_pos_w is not None:
+        delta = align_first_pos_w - out[0]
+        out += delta[None, :]
+        ops.append({"type": "align_first_pos_w", "target_w": align_first_pos_w.tolist(), "delta_w": delta.tolist()})
+
+    if align_last_pos_w is not None:
+        delta = align_last_pos_w - out[-1]
+        if align_last_ramp_sec > 0.0:
+            ramp_steps = max(2, int(round(align_last_ramp_sec * target_fps)) + 1)
+            start_idx = max(0, out.shape[0] - ramp_steps)
+            denom = max(1, out.shape[0] - 1 - start_idx)
+            for idx in range(start_idx, out.shape[0]):
+                alpha = float(idx - start_idx) / float(denom)
+                out[idx] += alpha * delta
+            ops.append(
+                {
+                    "type": "align_last_pos_w_ramp",
+                    "target_w": align_last_pos_w.tolist(),
+                    "delta_w": delta.tolist(),
+                    "ramp_sec": float(align_last_ramp_sec),
+                    "ramp_steps": int(out.shape[0] - start_idx),
+                }
+            )
+        else:
+            out += delta[None, :]
+            ops.append({"type": "align_last_pos_w_global", "target_w": align_last_pos_w.tolist(), "delta_w": delta.tolist()})
+
+    if clip_z_min is not None:
+        out[:, 2] = np.maximum(out[:, 2], clip_z_min)
+        ops.append({"type": "clip_z_min", "value": float(clip_z_min)})
+    if clip_z_max is not None:
+        out[:, 2] = np.minimum(out[:, 2], clip_z_max)
+        ops.append({"type": "clip_z_max", "value": float(clip_z_max)})
+    if clip_xy_min is not None:
+        out[:, 0] = np.maximum(out[:, 0], clip_xy_min[0])
+        out[:, 1] = np.maximum(out[:, 1], clip_xy_min[1])
+        ops.append({"type": "clip_xy_min", "value": clip_xy_min.tolist()})
+    if clip_xy_max is not None:
+        out[:, 0] = np.minimum(out[:, 0], clip_xy_max[0])
+        out[:, 1] = np.minimum(out[:, 1], clip_xy_max[1])
+        ops.append({"type": "clip_xy_max", "value": clip_xy_max.tolist()})
+
+    summary = {
+        "enabled": len(ops) > 0,
+        "ops": ops,
+        "source_first_w": obj_pos_w[0].tolist(),
+        "source_last_w": obj_pos_w[-1].tolist(),
+        "source_min_w": obj_pos_w.min(axis=0).tolist(),
+        "source_max_w": obj_pos_w.max(axis=0).tolist(),
+        "result_first_w": out[0].tolist(),
+        "result_last_w": out[-1].tolist(),
+        "result_min_w": out.min(axis=0).tolist(),
+        "result_max_w": out.max(axis=0).tolist(),
+    }
+    return out, summary
+
+
 def _make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hoi-pickle", required=True, help="Path to hoifhli human_object_results.pkl.")
@@ -399,6 +496,28 @@ def _make_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--hoi-fps", type=float, default=30.0, help="Input HOI trajectory FPS.")
     parser.add_argument("--target-fps", type=float, default=50.0, help="Output replay FPS for Isaac.")
+    parser.add_argument("--traj-scale-xyz", default="1.0,1.0,1.0", help="Object trajectory scale in world XYZ.")
+    parser.add_argument("--traj-offset-w", default="0.0,0.0,0.0", help="Object trajectory world translation offset XYZ.")
+    parser.add_argument(
+        "--align-first-pos-w",
+        default=None,
+        help="If set, shifts trajectory so first object position becomes this world XYZ.",
+    )
+    parser.add_argument(
+        "--align-last-pos-w",
+        default=None,
+        help="If set, aligns trajectory end position to this world XYZ.",
+    )
+    parser.add_argument(
+        "--align-last-ramp-sec",
+        type=float,
+        default=0.0,
+        help="When aligning end position, blend only last N seconds instead of shifting whole sequence.",
+    )
+    parser.add_argument("--clip-z-min", type=float, default=None, help="Lower bound for object Z in world frame.")
+    parser.add_argument("--clip-z-max", type=float, default=None, help="Upper bound for object Z in world frame.")
+    parser.add_argument("--clip-xy-min", default=None, help="Optional world XY lower bounds (x_min,y_min).")
+    parser.add_argument("--clip-xy-max", default=None, help="Optional world XY upper bounds (x_max,y_max).")
 
     parser.add_argument(
         "--bodex-grasp-npy",
@@ -482,6 +601,25 @@ def main() -> None:
 
     obj_pos = _resample_positions(obj_pos_src, args.hoi_fps, args.target_fps)
     obj_rot = _resample_rotmats(obj_rot_src, args.hoi_fps, args.target_fps)
+    traj_scale_xyz = _parse_csv_floats(args.traj_scale_xyz, 3, "traj_scale_xyz")
+    traj_offset_w = _parse_csv_floats(args.traj_offset_w, 3, "traj_offset_w")
+    align_first_pos_w = _parse_optional_csv_floats(args.align_first_pos_w, 3, "align_first_pos_w")
+    align_last_pos_w = _parse_optional_csv_floats(args.align_last_pos_w, 3, "align_last_pos_w")
+    clip_xy_min = _parse_optional_csv_floats(args.clip_xy_min, 2, "clip_xy_min")
+    clip_xy_max = _parse_optional_csv_floats(args.clip_xy_max, 2, "clip_xy_max")
+    obj_pos, traj_constraint_summary = _apply_object_traj_constraints(
+        obj_pos_w=obj_pos,
+        target_fps=args.target_fps,
+        scale_xyz=traj_scale_xyz,
+        offset_w=traj_offset_w,
+        align_first_pos_w=align_first_pos_w,
+        align_last_pos_w=align_last_pos_w,
+        align_last_ramp_sec=args.align_last_ramp_sec,
+        clip_z_min=args.clip_z_min,
+        clip_z_max=args.clip_z_max,
+        clip_xy_min=clip_xy_min,
+        clip_xy_max=clip_xy_max,
+    )
     n = obj_pos.shape[0]
     if n < 2:
         raise ValueError("Trajectory needs at least 2 frames after resampling.")
@@ -608,6 +746,7 @@ def main() -> None:
             "episode_name": args.episode_name,
         },
         "object_name": object_name,
+        "traj_constraints": traj_constraint_summary,
         "length": {
             "src_frames": int(obj_pos_src.shape[0]),
             "dst_frames": int(n),
@@ -641,6 +780,8 @@ def main() -> None:
         json.dump(debug, f, indent=2)
 
     print(f"[bridge] HOI frames: {obj_pos_src.shape[0]} @ {args.hoi_fps:.3f}Hz -> {n} @ {args.target_fps:.3f}Hz")
+    if traj_constraint_summary["enabled"]:
+        print(f"[bridge] Applied trajectory constraints: {len(traj_constraint_summary['ops'])} ops")
     print(f"[bridge] Action replay saved: {os.path.abspath(args.output_hdf5)}")
     print(f"[bridge] Object kinematic traj saved: {os.path.abspath(args.output_object_traj)}")
     print(f"[bridge] Debug metadata saved: {os.path.abspath(args.output_debug_json)}")

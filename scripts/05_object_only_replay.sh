@@ -13,7 +13,7 @@ ISAAC_ROOT="$PACK_ROOT/repos/IsaacLab-Arena"
 PYTHON="${ISAAC_PYTHON:-$(command -v python3)}"
 
 cd "$ISAAC_ROOT"
-"$PYTHON" isaaclab_arena/examples/policy_runner_kinematic_object_replay.py \
+"$PYTHON" "$PACK_ROOT/isaac_replay/policy_runner_kinematic_object_replay.py" \
   --headless --device cpu --enable_cameras \
   --object-only \
   --kin-traj-path "$OUT_DIR/object_kinematic_traj.npz" \

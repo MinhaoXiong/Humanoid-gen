@@ -12,7 +12,7 @@ ISAAC_ROOT="$PACK_ROOT/repos/IsaacLab-Arena"
 PYTHON="${ISAAC_PYTHON:-$(command -v python3)}"
 
 cd "$ISAAC_ROOT"
-"$PYTHON" tools/hoi_bodex_g1_bridge/build_replay.py \
+"$PYTHON" "$PACK_ROOT/bridge/build_replay.py" \
   --hoi-pickle "$HOI_PKL" \
   --output-hdf5 "$OUT_DIR/replay_actions.hdf5" \
   --output-object-traj "$OUT_DIR/object_kinematic_traj.npz" \
