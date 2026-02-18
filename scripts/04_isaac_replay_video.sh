@@ -7,6 +7,12 @@ OUT_DIR=${1:-"$PACK_ROOT/artifacts/g1_bridge_run1"}
 VIDEO_PREFIX=${2:-"g1_bridge_run1"}
 VIDEO_DIR=${3:-"$PACK_ROOT/artifacts/videos"}
 
+DEFAULT_HOI_ROOT="$PACK_ROOT/assets/hoifhli_release_min"
+if [[ ! -d "$DEFAULT_HOI_ROOT" ]]; then
+  DEFAULT_HOI_ROOT="$PACK_ROOT/repos/hoifhli_release"
+fi
+HOI_ROOT=${HOI_ROOT:-"$DEFAULT_HOI_ROOT"}
+
 mkdir -p "$VIDEO_DIR"
 
 ISAAC_ROOT="$PACK_ROOT/repos/IsaacLab-Arena"
@@ -21,7 +27,7 @@ cd "$ISAAC_ROOT"
   --kin-traj-path "$OUT_DIR/object_kinematic_traj.npz" \
   --kin-apply-timing pre_step \
   --use-hoi-object \
-  --hoi-root "$PACK_ROOT/repos/hoifhli_release" \
+  --hoi-root "$HOI_ROOT" \
   --hoi-usd-cache-dir "$PACK_ROOT/artifacts/hoi_runtime_usd" \
   --max-steps 408 \
   --save-video \

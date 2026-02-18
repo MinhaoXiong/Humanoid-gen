@@ -15,6 +15,7 @@ export PACK_ROOT=/home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
 export ISAAC_PYTHON=/home/ubuntu/miniconda3/envs/isaaclab_arena/bin/python
 export DEVICE=cuda:0
 export HOI_PKL=$PACK_ROOT/artifacts/hoifhli/human_object_results_compare_fine_01_p0_o3.pkl
+export HOI_ROOT=$PACK_ROOT/assets/hoifhli_release_min
 
 # 已经推送好的 HOIDiNi 结果（另一台机器无 HOIDiNi 环境时直接用）
 export HOIDINI_FINAL_PKL=$PACK_ROOT/artifacts/hoidini_kitchen_pickplace_run1/cphoi__cphoi_05011024_c15p100_v0__model000120000__0000__s10_alarmclock_lift_Retake__alarmclock__The_person_is_lifting_a_alarmclock__final.pickle
@@ -41,7 +42,7 @@ cd "$PACK_ROOT/repos/IsaacLab-Arena"
   --kin-traj-path "$PACK_ROOT/artifacts/debug4_gui/object_kinematic_traj.npz" \
   --kin-apply-timing pre_step \
   --use-hoi-object \
-  --hoi-root "$PACK_ROOT/repos/hoifhli_release" \
+  --hoi-root "$HOI_ROOT" \
   --hoi-usd-cache-dir "$PACK_ROOT/artifacts/hoi_runtime_usd" \
   galileo_g1_locomanip_pick_and_place \
   --embodiment g1_wbc_pink
@@ -59,7 +60,7 @@ cd "$PACK_ROOT/repos/IsaacLab-Arena"
   --kin-traj-path "$PACK_ROOT/artifacts/debug4_gui/object_kinematic_traj.npz" \
   --kin-apply-timing pre_step \
   --use-hoi-object \
-  --hoi-root "$PACK_ROOT/repos/hoifhli_release" \
+  --hoi-root "$HOI_ROOT" \
   --hoi-usd-cache-dir "$PACK_ROOT/artifacts/hoi_runtime_usd" \
   --max-steps 408 \
   galileo_g1_locomanip_pick_and_place \
@@ -130,7 +131,7 @@ cd "$PACK_ROOT/repos/IsaacLab-Arena"
   --kin-traj-path "$PACK_ROOT/artifacts/acceptance_b_gui/object_kinematic_traj.npz" \
   --kin-apply-timing pre_step \
   --use-hoi-object \
-  --hoi-root "$PACK_ROOT/repos/hoifhli_release" \
+  --hoi-root "$HOI_ROOT" \
   --hoi-usd-cache-dir "$PACK_ROOT/artifacts/hoi_runtime_usd" \
   --max-steps 120 \
   galileo_g1_locomanip_pick_and_place \
