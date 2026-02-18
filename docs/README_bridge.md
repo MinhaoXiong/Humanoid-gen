@@ -130,20 +130,26 @@ For the full chain starting from `hoifhli_release` and `BODex` commands (plus en
 3. Remove kinematic forcing and switch to dynamic object interaction with contact-consistent control.
 4. Add closed-loop correction (state feedback) on top of replay initialization.
 
-## 8. Debug Plan A (No HOI Trajectory)
+## 8. 调试方案 A（不使用 HOI 轨迹）
 
-Goal:
-- isolate Isaac scene/object/asset scale issues from HOI generation errors.
+目标：
+- 先把 Isaac 侧的问题（场景、物体资产、坐标系、尺度）和 HOI 生成问题解耦。
+- 用可控的“人工轨迹”验证 `policy_runner_kinematic_object_replay.py` 的回放链路是否稳定。
 
-What is implemented:
-- `isaac_replay/generate_debug_object_traj.py`: generate synthetic object trajectory (`line`, `circle`, `lift_place`).
-- `scripts/06_debug_scene_object_gui.sh`: one-command GUI replay with `--object-only`.
+已实现内容：
+- `isaac_replay/generate_debug_object_traj.py`
+  - 生成三种轨迹模式：`line`、`circle`、`lift_place`
+  - 可指定/覆盖场景起终点、圆轨迹参数、yaw 旋转
+  - 产出标准 `object_kinematic_traj.npz`，可直接被 replay runner 使用
+- `scripts/06_debug_scene_object_gui.sh`
+  - 一条命令完成“轨迹生成 + GUI 回放（`--object-only`）”
+  - 自动根据环境名映射 `scene preset`
 
-Why this is useful:
-- if object still flies with synthetic trajectory, issue is in scene/object asset/or frame usage.
-- if synthetic trajectory is stable, issue is likely in HOI trajectory frame/scale mismatch.
+推荐判定方式：
+1. 如果 synthetic 轨迹也“飞天/穿模”，优先排查 Isaac 侧：资产尺寸、初始位姿、场景碰撞、物体参考系。
+2. 如果 synthetic 轨迹稳定，而 HOI 轨迹不稳定，问题大概率在 HOI 轨迹的世界系对齐/尺度映射。
 
-Example (GUI, non-headless):
+示例（GUI，非 headless）：
 
 ```bash
 cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
@@ -152,28 +158,32 @@ cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
   lift_place brown_box galileo_g1_locomanip_pick_and_place
 ```
 
-## 9. Debug Plan B (Constrain HOI Trajectory To Isaac Scene)
+## 9. 调试方案 B（对 HOI 轨迹加场景约束）
 
-Goal:
-- keep using HOI motion, but enforce scene-compatible start/end and spatial bounds.
+目标：
+- 保留 HOI 生成轨迹，但在 bridge 阶段加入“场景一致性约束”，降低飞天/漂移。
 
-What is implemented:
-- `bridge/build_replay.py` adds trajectory constraints:
-  - `--traj-scale-xyz`
-  - `--traj-offset-w`
-  - `--align-first-pos-w`
-  - `--align-last-pos-w`
-  - `--align-last-ramp-sec`
-  - `--clip-z-min`, `--clip-z-max`
-  - `--clip-xy-min`, `--clip-xy-max`
-- `scripts/07_build_replay_constrained.sh`: one-command constrained replay build.
-- constraint ops and before/after range are recorded under `traj_constraints` in `bridge_debug.json`.
+已实现内容：
+- `bridge/build_replay.py` 新增轨迹约束参数：
+  - 尺度：`--traj-scale-xyz`
+  - 平移：`--traj-offset-w`
+  - 起点对齐：`--align-first-pos-w`
+  - 终点对齐：`--align-last-pos-w` + `--align-last-ramp-sec`
+  - 范围裁剪：`--clip-z-min`、`--clip-z-max`、`--clip-xy-min`、`--clip-xy-max`
+- `scripts/07_build_replay_constrained.sh`
+  - 一条命令构建带约束的 replay 产物
+  - 默认参数针对 `galileo_g1_locomanip_pick_and_place`
+- `bridge_debug.json` 写入 `traj_constraints`
+  - 包含操作列表、源轨迹范围、约束后范围，便于定量排查
 
-Why this is useful:
-- directly addresses object flying caused by world-frame offset, over-high z trajectory, or scene boundary mismatch.
-- lower cost than retraining HOI; preserves your current bridge/policy stack.
+约束执行顺序（代码真实顺序）：
+1. `scale_xyz`（绕首帧锚点缩放）
+2. `offset_w`（整体平移）
+3. `align_first_pos_w`（对齐首帧到场景目标点）
+4. `align_last_pos_w`（可选，支持尾段 ramp 对齐）
+5. `clip_z/clip_xy`（硬边界裁剪）
 
-Example:
+示例：
 
 ```bash
 cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
@@ -182,9 +192,9 @@ cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
   /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/artifacts/g1_bridge_constrained
 ```
 
-## 10. Four-Command Debug Workflow (GUI)
+## 10. 四条命令跑完整个双工作流（GUI）
 
-1) Generate synthetic baseline trajectory:
+1. 生成 synthetic 基线轨迹：
 
 ```bash
 cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
@@ -196,7 +206,7 @@ cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
   --scene-preset galileo_locomanip
 ```
 
-2) Replay synthetic trajectory in Isaac GUI (`object-only`):
+2. 在 Isaac GUI 回放 synthetic（`object-only`）：
 
 ```bash
 cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/repos/IsaacLab-Arena
@@ -211,7 +221,7 @@ cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/repos/IsaacLab-Arena
   --embodiment g1_wbc_pink
 ```
 
-3) Build constrained replay from HOI trajectory:
+3. 从 HOI 构建带约束 replay：
 
 ```bash
 cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
@@ -225,7 +235,7 @@ cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
   --clip-z-min 0.06 --clip-z-max 0.40
 ```
 
-4) Replay constrained HOI trajectory in Isaac GUI:
+4. 在 Isaac GUI 回放带约束 HOI 结果：
 
 ```bash
 cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/repos/IsaacLab-Arena
@@ -244,95 +254,76 @@ cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/repos/IsaacLab-Arena
   --embodiment g1_wbc_pink
 ```
 
-## 11. Dual Debug Workflow: Detailed Code Flow
+## 11. 双工作流代码级详细流程（函数/文件粒度）
 
-This section explains the code-level execution path for both debug workflows.
+### 11.1 方案 A：Synthetic 轨迹链路
 
-### 11.1 Workflow A: Synthetic Trajectory (No HOI)
-
-Entry points:
-- Script mode: `scripts/06_debug_scene_object_gui.sh`
-- Raw mode:
+入口：
+- 脚本入口：`scripts/06_debug_scene_object_gui.sh`
+- 原子入口：
   - `isaac_replay/generate_debug_object_traj.py`
   - `isaac_replay/policy_runner_kinematic_object_replay.py --object-only`
 
-Execution flow:
-1. `scripts/06_debug_scene_object_gui.sh`
-   - resolves scene preset from environment name (`galileo_locomanip`, `kitchen_pick_and_place`, or `none`)
-   - generates trajectory npz into `OUT_DIR/object_kinematic_traj.npz`
-   - launches Isaac replay runner in GUI with `--object-only`
+流程：
+1. `06_debug_scene_object_gui.sh`
+   - 解析参数：`OUT_DIR`、`PATTERN`、`OBJECT`、`SCENE`
+   - 根据 `SCENE` 推导 `SCENE_PRESET`
+   - 调 `generate_debug_object_traj.py` 生成 `object_kinematic_traj.npz`
+   - 调 `policy_runner_kinematic_object_replay.py` 进行 GUI 回放
 2. `generate_debug_object_traj.py`
-   - parses pattern (`line`, `circle`, `lift_place`)
-   - resolves start/end from scene preset or overrides
-   - generates:
-     - `object_pos_w` (T,3)
-     - `object_quat_wxyz` (T,4)
-     - `object_rot_mat_w` (T,3,3)
-   - writes:
-     - trajectory npz
-     - optional summary json
+   - 解析模式和 scene preset
+   - 生成 `object_pos_w` + `object_quat_wxyz` + `object_rot_mat_w`
+   - 写入 npz（与 bridge 输出格式一致）
+   - 可选写 `debug_traj.json`
 3. `policy_runner_kinematic_object_replay.py`
-   - builds env via IsaacLab-Arena example environment
-   - constructs `ObjectKinematicReplayer`
-   - each sim step:
-     - writes root pose from `object_pos_w/object_quat_wxyz`
-     - writes zero velocity
-   - because `--object-only`, robot actions are zeros and robot remains still
+   - 创建 `ObjectKinematicReplayer`
+   - 每 step 直接写物体根位姿与零速度
+   - `--object-only` 时，机器人 action 为全零，机器人不参与动作控制
 
-Output artifacts:
-- `artifacts/debug_scheme1/object_kinematic_traj.npz`
-- `artifacts/debug_scheme1/debug_traj.json` (if requested)
+输入输出：
+- 输入：无 HOI 依赖（仅场景 preset + 脚本参数）
+- 输出：
+  - `artifacts/debug_scheme1/object_kinematic_traj.npz`
+  - `artifacts/debug_scheme1/debug_traj.json`
 
-Use this to answer:
-- does object still fly in a controlled trajectory?
-- if yes: issue is likely scene/asset/frame side
-- if no: HOI trajectory alignment is the likely source
+### 11.2 方案 B：带约束 HOI 轨迹链路
 
-### 11.2 Workflow B: Constrained HOI Trajectory
-
-Entry points:
-- Script mode: `scripts/07_build_replay_constrained.sh`
-- Raw mode:
-  - `bridge/build_replay.py` (with trajectory constraints)
+入口：
+- 脚本入口：`scripts/07_build_replay_constrained.sh`
+- 原子入口：
+  - `bridge/build_replay.py`
   - `isaac_replay/policy_runner_kinematic_object_replay.py --policy_type replay`
 
-Execution flow:
-1. `scripts/07_build_replay_constrained.sh`
-   - reads HOI pickle path and output dir
-   - applies default constraint set tuned for `galileo_g1_locomanip_pick_and_place`
-   - invokes `bridge/build_replay.py`
-2. `bridge/build_replay.py`
-   - loads HOI trajectory (`obj_pos`, `obj_rot_mat`)
-   - resamples to target fps
-   - applies trajectory constraints in `_apply_object_traj_constraints`:
-     - scaling: `--traj-scale-xyz`
-     - translation: `--traj-offset-w`
-     - first-frame alignment: `--align-first-pos-w`
-     - end-frame alignment (optional): `--align-last-pos-w` + `--align-last-ramp-sec`
-     - spatial clipping:
-       - `--clip-z-min`, `--clip-z-max`
-       - `--clip-xy-min`, `--clip-xy-max`
-   - builds replay actions (`[T,23]`) and object trajectory npz
-   - records before/after constraint summary in `bridge_debug.json` under `traj_constraints`
+流程：
+1. `07_build_replay_constrained.sh`
+   - 读取 HOI pkl 和输出目录
+   - 拼装约束参数（含默认值）
+   - 调 `bridge/build_replay.py`
+2. `build_replay.py`
+   - 加载 HOI `obj_pos/obj_rot_mat`
+   - 重采样到目标 fps
+   - 在 `_apply_object_traj_constraints` 中按顺序做约束
+   - 生成：
+     - `replay_actions.hdf5`
+     - `object_kinematic_traj.npz`
+     - `bridge_debug.json`（含 `traj_constraints`）
 3. `policy_runner_kinematic_object_replay.py`
-   - replays robot action hdf5
-   - overwrites object root pose each step from constrained `object_kinematic_traj.npz`
-   - optional runtime HOI mesh conversion via `--use-hoi-object`
+   - 回放 action policy（replay）
+   - 每 step 覆写物体根位姿（来自约束后的 npz）
+   - 可选 `--use-hoi-object` 将 HOI mesh 转成运行时 USD
 
-Output artifacts:
-- `artifacts/g1_bridge_constrained/replay_actions.hdf5`
-- `artifacts/g1_bridge_constrained/object_kinematic_traj.npz`
-- `artifacts/g1_bridge_constrained/bridge_debug.json`
+输入输出：
+- 输入：HOI `human_object_results.pkl`
+- 输出：
+  - `artifacts/g1_bridge_constrained/replay_actions.hdf5`
+  - `artifacts/g1_bridge_constrained/object_kinematic_traj.npz`
+  - `artifacts/g1_bridge_constrained/bridge_debug.json`
 
-Use this to answer:
-- whether world-frame drift / over-high z / out-of-range xy caused the flying behavior
-- which exact constraints were applied (`traj_constraints.ops`)
+## 12. 命令矩阵（脚本版 + 原始命令版）
 
-## 12. Dual Debug Workflow: Command Matrix
+### 12.1 脚本一键版
 
-### 12.1 One-command wrappers
-
-Workflow A (GUI, synthetic trajectory):
+方案 A（GUI）：
 ```bash
 cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
 ./scripts/06_debug_scene_object_gui.sh \
@@ -340,7 +331,7 @@ cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
   lift_place brown_box galileo_g1_locomanip_pick_and_place
 ```
 
-Workflow B (build constrained replay):
+方案 B（构建约束 replay）：
 ```bash
 cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
 ./scripts/07_build_replay_constrained.sh \
@@ -348,9 +339,9 @@ cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
   /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/artifacts/g1_bridge_constrained
 ```
 
-### 12.2 Raw commands (fully explicit)
+### 12.2 原始命令版（完全显式）
 
-Synthetic trajectory generation:
+生成 synthetic 轨迹：
 ```bash
 cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
 /home/ubuntu/miniconda3/envs/isaaclab_arena/bin/python isaac_replay/generate_debug_object_traj.py \
@@ -362,7 +353,7 @@ cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
   --fps 50 --duration-sec 8.0
 ```
 
-Object-only GUI replay:
+GUI 回放 synthetic：
 ```bash
 cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/repos/IsaacLab-Arena
 /home/ubuntu/miniconda3/envs/isaaclab_arena/bin/python /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/isaac_replay/policy_runner_kinematic_object_replay.py \
@@ -376,7 +367,7 @@ cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/repos/IsaacLab-Arena
   --embodiment g1_wbc_pink
 ```
 
-Constrained replay build:
+构建带约束 replay：
 ```bash
 cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
 /home/ubuntu/miniconda3/envs/isaaclab_arena/bin/python bridge/build_replay.py \
@@ -392,7 +383,7 @@ cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
   --clip-z-min 0.06 --clip-z-max 0.40
 ```
 
-GUI replay with constrained HOI trajectory:
+GUI 回放带约束 HOI：
 ```bash
 cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/repos/IsaacLab-Arena
 /home/ubuntu/miniconda3/envs/isaaclab_arena/bin/python /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/isaac_replay/policy_runner_kinematic_object_replay.py \
@@ -410,14 +401,15 @@ cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/repos/IsaacLab-Arena
   --embodiment g1_wbc_pink
 ```
 
-### 12.3 Quick verification commands
+### 12.3 快速核验命令
 
-Check constraint summary in debug json:
+检查约束是否生效（读取 `traj_constraints`）：
 ```bash
 python - <<'PY'
 import json
 p='artifacts/g1_bridge_constrained/bridge_debug.json'
-with open(p) as f: d=json.load(f)
+with open(p) as f:
+    d=json.load(f)
 print('enabled:', d['traj_constraints']['enabled'])
 print('ops:', [op['type'] for op in d['traj_constraints']['ops']])
 print('first:', d['traj_constraints']['result_first_w'])
