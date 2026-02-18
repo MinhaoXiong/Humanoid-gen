@@ -130,32 +130,40 @@ For the full chain starting from `hoifhli_release` and `BODex` commands (plus en
 3. Remove kinematic forcing and switch to dynamic object interaction with contact-consistent control.
 4. Add closed-loop correction (state feedback) on top of replay initialization.
 
-## 8. 调试方案 A（不使用 HOI 轨迹）
+## 8. 调试方案 A-2（桌面场景 + 固定 pelvis + 手臂跟随物体）
 
 目标：
-- 先把 Isaac 侧的问题（场景、物体资产、坐标系、尺度）和 HOI 生成问题解耦。
-- 用可控的“人工轨迹”验证 `policy_runner_kinematic_object_replay.py` 的回放链路是否稳定。
+- 在非 HOI 轨迹下做“可控基线”，并贴近你要的调试形态：
+  - 使用桌面场景
+  - 固定 pelvis（base/nav 命令为 0）
+  - 只让手臂按给定规则跟随物体运动
 
 已实现内容：
 - `isaac_replay/generate_debug_object_traj.py`
   - 生成三种轨迹模式：`line`、`circle`、`lift_place`
   - 可指定/覆盖场景起终点、圆轨迹参数、yaw 旋转
   - 产出标准 `object_kinematic_traj.npz`，可直接被 replay runner 使用
-- `scripts/06_debug_scene_object_gui.sh`
-  - 一条命令完成“轨迹生成 + GUI 回放（`--object-only`）”
-  - 自动根据环境名映射 `scene preset`
+- `isaac_replay/build_arm_follow_replay.py`
+  - 从 `object_kinematic_traj.npz` 生成 `replay_actions.hdf5`
+  - base/nav 固定为 0（pelvis 不走导航）
+  - 右手腕目标由“物体位姿 + object frame 下相对偏移”计算
+- `scripts/08_debug_arm_follow_gui.sh`
+  - 一条命令完成：轨迹生成 + A-2 replay 生成 + GUI 回放
+  - 默认场景是 `kitchen_pick_and_place`（桌面厨房场景）
 
 推荐判定方式：
-1. 如果 synthetic 轨迹也“飞天/穿模”，优先排查 Isaac 侧：资产尺寸、初始位姿、场景碰撞、物体参考系。
-2. 如果 synthetic 轨迹稳定，而 HOI 轨迹不稳定，问题大概率在 HOI 轨迹的世界系对齐/尺度映射。
+1. 如果 A-2 下仍然“飞天/穿模”，优先排查 Isaac 资产/场景/坐标系和手腕偏移配置。
+2. 如果 A-2 稳定而 HOI 不稳定，优先排查 HOI 世界系对齐与尺度映射。
+3. A-2 默认场景环境定义文件：
+   - `repos/IsaacLab-Arena/isaaclab_arena/examples/example_environments/kitchen_pick_and_place_environment.py`
 
 示例（GUI，非 headless）：
 
 ```bash
 cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
-./scripts/06_debug_scene_object_gui.sh \
-  /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/artifacts/debug_scheme1 \
-  lift_place brown_box galileo_g1_locomanip_pick_and_place
+./scripts/08_debug_arm_follow_gui.sh \
+  /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/artifacts/debug_schemeA2 \
+  lift_place kitchen_pick_and_place cracker_box
 ```
 
 ## 9. 调试方案 B（对 HOI 轨迹加场景约束）
@@ -192,36 +200,52 @@ cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
   /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/artifacts/g1_bridge_constrained
 ```
 
-## 10. 四条命令跑完整个双工作流（GUI）
+## 10. 五条命令跑完整个双工作流（GUI）
 
-1. 生成 synthetic 基线轨迹：
+1. 生成 A-2 的 synthetic 物体轨迹（桌面场景）：
 
 ```bash
 cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
 /home/ubuntu/miniconda3/envs/isaaclab_arena/bin/python isaac_replay/generate_debug_object_traj.py \
-  --output artifacts/debug_scheme1/object_kinematic_traj.npz \
-  --output-debug-json artifacts/debug_scheme1/debug_traj.json \
-  --object-name brown_box \
+  --output artifacts/debug_schemeA2/object_kinematic_traj.npz \
+  --output-debug-json artifacts/debug_schemeA2/debug_traj.json \
+  --object-name cracker_box \
   --pattern lift_place \
-  --scene-preset galileo_locomanip
+  --scene-preset kitchen_pick_and_place
 ```
 
-2. 在 Isaac GUI 回放 synthetic（`object-only`）：
+2. 生成 A-2 手臂跟随 replay（固定 pelvis，仅手臂跟随）：
+
+```bash
+cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
+/home/ubuntu/miniconda3/envs/isaaclab_arena/bin/python isaac_replay/build_arm_follow_replay.py \
+  --kin-traj-path artifacts/debug_schemeA2/object_kinematic_traj.npz \
+  --output-hdf5 artifacts/debug_schemeA2/replay_actions_arm_follow.hdf5 \
+  --output-debug-json artifacts/debug_schemeA2/debug_replay.json \
+  --base-pos-w "0.0,0.0,0.0" \
+  --base-yaw 0.0 \
+  --right-wrist-pos-obj "-0.20,-0.03,0.10" \
+  --right-wrist-quat-obj-wxyz "1.0,0.0,0.0,0.0"
+```
+
+3. 在 Isaac GUI 回放 A-2（桌面场景）：
 
 ```bash
 cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/repos/IsaacLab-Arena
 /home/ubuntu/miniconda3/envs/isaaclab_arena/bin/python /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/isaac_replay/policy_runner_kinematic_object_replay.py \
   --device cuda:0 --enable_cameras \
-  --object-only \
-  --kin-traj-path /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/artifacts/debug_scheme1/object_kinematic_traj.npz \
-  --kin-asset-name brown_box \
+  --policy_type replay \
+  --replay_file_path /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/artifacts/debug_schemeA2/replay_actions_arm_follow.hdf5 \
+  --episode_name demo_0 \
+  --kin-traj-path /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/artifacts/debug_schemeA2/object_kinematic_traj.npz \
+  --kin-asset-name cracker_box \
   --kin-apply-timing pre_step \
-  galileo_g1_locomanip_pick_and_place \
-  --object brown_box \
+  kitchen_pick_and_place \
+  --object cracker_box \
   --embodiment g1_wbc_pink
 ```
 
-3. 从 HOI 构建带约束 replay：
+4. 从 HOI 构建带约束 replay：
 
 ```bash
 cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
@@ -235,7 +259,7 @@ cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
   --clip-z-min 0.06 --clip-z-max 0.40
 ```
 
-4. 在 Isaac GUI 回放带约束 HOI 结果：
+5. 在 Isaac GUI 回放带约束 HOI 结果：
 
 ```bash
 cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/repos/IsaacLab-Arena
@@ -256,35 +280,44 @@ cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/repos/IsaacLab-Arena
 
 ## 11. 双工作流代码级详细流程（函数/文件粒度）
 
-### 11.1 方案 A：Synthetic 轨迹链路
+### 11.1 方案 A-2：桌面场景 + 固定 pelvis + 手臂跟随
 
 入口：
-- 脚本入口：`scripts/06_debug_scene_object_gui.sh`
+- 脚本入口：`scripts/08_debug_arm_follow_gui.sh`
 - 原子入口：
   - `isaac_replay/generate_debug_object_traj.py`
-  - `isaac_replay/policy_runner_kinematic_object_replay.py --object-only`
+  - `isaac_replay/build_arm_follow_replay.py`
+  - `isaac_replay/policy_runner_kinematic_object_replay.py --policy_type replay`
 
 流程：
-1. `06_debug_scene_object_gui.sh`
+1. `08_debug_arm_follow_gui.sh`
    - 解析参数：`OUT_DIR`、`PATTERN`、`OBJECT`、`SCENE`
    - 根据 `SCENE` 推导 `SCENE_PRESET`
    - 调 `generate_debug_object_traj.py` 生成 `object_kinematic_traj.npz`
+   - 调 `build_arm_follow_replay.py` 生成 `replay_actions_arm_follow.hdf5`
    - 调 `policy_runner_kinematic_object_replay.py` 进行 GUI 回放
 2. `generate_debug_object_traj.py`
    - 解析模式和 scene preset
    - 生成 `object_pos_w` + `object_quat_wxyz` + `object_rot_mat_w`
    - 写入 npz（与 bridge 输出格式一致）
    - 可选写 `debug_traj.json`
-3. `policy_runner_kinematic_object_replay.py`
-   - 创建 `ObjectKinematicReplayer`
-   - 每 step 直接写物体根位姿与零速度
-   - `--object-only` 时，机器人 action 为全零，机器人不参与动作控制
+3. `build_arm_follow_replay.py`
+   - 读取 `object_kinematic_traj.npz`
+   - 固定 `NAV_CMD=[0,0,0]`，实现 pelvis/base 不走导航
+   - 将“右手腕在物体坐标系的相对位姿”映射为 pelvis frame 目标
+   - 输出 `replay_actions_arm_follow.hdf5`
+4. `policy_runner_kinematic_object_replay.py`
+   - 按 replay action 驱动机器人（A-2 中只需要上肢跟随）
+   - 每 step 覆写物体根位姿（来自 `object_kinematic_traj.npz`）
+   - 场景建议用 `kitchen_pick_and_place`
 
 输入输出：
 - 输入：无 HOI 依赖（仅场景 preset + 脚本参数）
 - 输出：
-  - `artifacts/debug_scheme1/object_kinematic_traj.npz`
-  - `artifacts/debug_scheme1/debug_traj.json`
+  - `artifacts/debug_schemeA2/object_kinematic_traj.npz`
+  - `artifacts/debug_schemeA2/replay_actions_arm_follow.hdf5`
+  - `artifacts/debug_schemeA2/debug_traj.json`
+  - `artifacts/debug_schemeA2/debug_replay.json`
 
 ### 11.2 方案 B：带约束 HOI 轨迹链路
 
@@ -323,12 +356,12 @@ cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/repos/IsaacLab-Arena
 
 ### 12.1 脚本一键版
 
-方案 A（GUI）：
+方案 A-2（GUI）：
 ```bash
 cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
-./scripts/06_debug_scene_object_gui.sh \
-  /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/artifacts/debug_scheme1 \
-  lift_place brown_box galileo_g1_locomanip_pick_and_place
+./scripts/08_debug_arm_follow_gui.sh \
+  /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/artifacts/debug_schemeA2 \
+  lift_place kitchen_pick_and_place cracker_box
 ```
 
 方案 B（构建约束 replay）：
@@ -341,29 +374,44 @@ cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
 
 ### 12.2 原始命令版（完全显式）
 
-生成 synthetic 轨迹：
+生成 A-2 synthetic 轨迹：
 ```bash
 cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
 /home/ubuntu/miniconda3/envs/isaaclab_arena/bin/python isaac_replay/generate_debug_object_traj.py \
-  --output artifacts/debug_scheme1/object_kinematic_traj.npz \
-  --output-debug-json artifacts/debug_scheme1/debug_traj.json \
-  --object-name brown_box \
+  --output artifacts/debug_schemeA2/object_kinematic_traj.npz \
+  --output-debug-json artifacts/debug_schemeA2/debug_traj.json \
+  --object-name cracker_box \
   --pattern lift_place \
-  --scene-preset galileo_locomanip \
+  --scene-preset kitchen_pick_and_place \
   --fps 50 --duration-sec 8.0
 ```
 
-GUI 回放 synthetic：
+A-2 replay 生成（固定 pelvis + 手臂跟随）：
+```bash
+cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack
+/home/ubuntu/miniconda3/envs/isaaclab_arena/bin/python isaac_replay/build_arm_follow_replay.py \
+  --kin-traj-path artifacts/debug_schemeA2/object_kinematic_traj.npz \
+  --output-hdf5 artifacts/debug_schemeA2/replay_actions_arm_follow.hdf5 \
+  --output-debug-json artifacts/debug_schemeA2/debug_replay.json \
+  --base-pos-w "0.0,0.0,0.0" \
+  --base-yaw 0.0 \
+  --right-wrist-pos-obj "-0.20,-0.03,0.10" \
+  --right-wrist-quat-obj-wxyz "1.0,0.0,0.0,0.0"
+```
+
+A-2 GUI 回放：
 ```bash
 cd /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/repos/IsaacLab-Arena
 /home/ubuntu/miniconda3/envs/isaaclab_arena/bin/python /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/isaac_replay/policy_runner_kinematic_object_replay.py \
   --device cuda:0 --enable_cameras \
-  --object-only \
-  --kin-traj-path /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/artifacts/debug_scheme1/object_kinematic_traj.npz \
-  --kin-asset-name brown_box \
+  --policy_type replay \
+  --replay_file_path /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/artifacts/debug_schemeA2/replay_actions_arm_follow.hdf5 \
+  --episode_name demo_0 \
+  --kin-traj-path /home/ubuntu/DATA2/workspace/xmh/Humanoid-gen-pack/artifacts/debug_schemeA2/object_kinematic_traj.npz \
+  --kin-asset-name cracker_box \
   --kin-apply-timing pre_step \
-  galileo_g1_locomanip_pick_and_place \
-  --object brown_box \
+  kitchen_pick_and_place \
+  --object cracker_box \
   --embodiment g1_wbc_pink
 ```
 
