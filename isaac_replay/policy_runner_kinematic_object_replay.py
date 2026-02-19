@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import numpy as np
 import os
 import random
@@ -82,6 +83,11 @@ def _add_object_replay_args(parser):
         "--object-only",
         action="store_true",
         help="Only replay object motion. Robot sends zero actions and stands still.",
+    )
+    parser.add_argument(
+        "--abort-on-reset",
+        action="store_true",
+        help="Abort immediately if any env terminates/truncates during replay.",
     )
     parser.add_argument(
         "--use-hoi-object",
@@ -506,10 +512,41 @@ def main():
         # lazy import to avoid app startup stalls
         from isaaclab_arena.metrics.metrics import compute_metrics
 
+        def _build_reset_debug(step: int, info: dict | None) -> dict:
+            detail: dict[str, object] = {"global_step": int(step)}
+            if info is not None:
+                detail["info_keys"] = sorted(list(info.keys()))
+            if hasattr(env, "termination_manager"):
+                try:
+                    tm = env.termination_manager
+                    terms: dict[str, object] = {}
+                    for name in getattr(tm, "active_terms", []):
+                        try:
+                            value = tm.get_term(name)
+                            if torch.is_tensor(value):
+                                terms[str(name)] = value.detach().cpu().tolist()
+                            else:
+                                terms[str(name)] = value
+                        except Exception as exc:  # pragma: no cover - best-effort debug
+                            terms[str(name)] = f"error:{type(exc).__name__}:{exc}"
+                    detail["termination_terms"] = terms
+                except Exception as exc:  # pragma: no cover - best-effort debug
+                    detail["termination_terms_error"] = f"{type(exc).__name__}: {exc}"
+            try:
+                detail["robot_root_pos_w"] = env.scene["robot"].data.root_pos_w[0].detach().cpu().tolist()
+            except Exception:
+                pass
+            try:
+                detail["object_root_pos_w"] = env.scene[args_cli.kin_asset_name].data.root_pos_w[0].detach().cpu().tolist()
+            except Exception:
+                pass
+            return detail
+
+        episode_step = 0
         for step in tqdm.tqdm(range(step_budget)):
             with torch.inference_mode():
                 if args_cli.kin_apply_timing == "pre_step":
-                    object_replayer.apply(env, step)
+                    object_replayer.apply(env, episode_step)
 
                 if object_only:
                     action_dim = env.action_space.shape[-1] if hasattr(env, "action_space") else 23
@@ -519,10 +556,10 @@ def main():
                     if actions is None:
                         print(f"Policy returned None at step {step}, stopping replay.")
                         break
-                obs, _, terminated, truncated, _ = env.step(actions)
+                obs, _, terminated, truncated, info = env.step(actions)
 
                 if args_cli.kin_apply_timing == "post_step":
-                    object_replayer.apply(env, step)
+                    object_replayer.apply(env, episode_step)
 
                 if args_cli.save_video:
                     if "camera_obs" in obs:
@@ -541,13 +578,26 @@ def main():
                             tp_frames.append(tp_frame)
 
                 if terminated.any() or truncated.any():
+                    reset_detail = _build_reset_debug(step=step, info=info if isinstance(info, dict) else None)
+                    if args_cli.abort_on_reset:
+                        term_ids = terminated.nonzero().flatten().tolist()
+                        trunc_ids = truncated.nonzero().flatten().tolist()
+                        raise RuntimeError(
+                            "Environment reset detected during replay "
+                            f"(step={step}, terminated={term_ids}, truncated={trunc_ids}). "
+                            f"Debug={json.dumps(reset_detail, ensure_ascii=True)}"
+                        )
                     print(
                         f"Resetting policy for terminated env_ids: {terminated.nonzero().flatten()}"
                         f" and truncated env_ids: {truncated.nonzero().flatten()}"
                     )
+                    print(f"Reset debug: {json.dumps(reset_detail, ensure_ascii=True)}")
                     env_ids = (terminated | truncated).nonzero().flatten()
                     if policy is not None:
                         policy.reset(env_ids=env_ids)
+                    episode_step = 0
+                    continue
+                episode_step += 1
 
         metrics = compute_metrics(env)
         print(f"Metrics: {metrics}")

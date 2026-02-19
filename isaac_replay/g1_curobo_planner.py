@@ -158,9 +158,25 @@ def _wrist_goal_in_base_frame(
     return p_b, q_b
 
 
+def _stabilize_target_yaw(
+    start_base_pos_w: np.ndarray,
+    target_base_pos_w: np.ndarray,
+    raw_target_yaw: float,
+    max_delta_deg: float = 20.0,
+) -> float:
+    travel = target_base_pos_w[:2] - start_base_pos_w[:2]
+    if float(np.linalg.norm(travel)) < 1e-6:
+        return float(raw_target_yaw)
+    heading = float(math.atan2(travel[1], travel[0]))
+    if _angle_diff_abs(raw_target_yaw, heading) <= math.radians(float(max_delta_deg)):
+        return float(raw_target_yaw)
+    return float(heading)
+
+
 def _rank_target_candidates(
     req: "PlannerRequest",
     start_base_pos_w: np.ndarray,
+    start_base_yaw: float,
     candidates: list[tuple[np.ndarray, float]],
     fallback_target_pos_w: np.ndarray | None = None,
 ) -> list[tuple[np.ndarray, float]]:
@@ -182,6 +198,8 @@ def _rank_target_candidates(
         heading = float(math.atan2(cand_pos_w[1] - start_base_pos_w[1], cand_pos_w[0] - start_base_pos_w[0]))
         yaw_mismatch = _angle_diff_abs(cand_yaw, heading)
         score = 4.0 * yaw_mismatch + 2.0 * max(0.0, yaw_mismatch - math.radians(35.0))
+        start_turn = _angle_diff_abs(heading, start_base_yaw)
+        score += 3.0 * start_turn + 3.0 * max(0.0, start_turn - math.radians(30.0))
         if tangent_vec is not None:
             disp = cand_pos_w[:2] - start_base_pos_w[:2]
             tangent_shift = abs(float(np.dot(disp, tangent_vec)))
@@ -751,6 +769,9 @@ def _resolve_target_pose_momagen(
             continue
         if float(req.target_max_travel_dist) > float(req.target_min_travel_dist) and nav_dist > float(req.target_max_travel_dist):
             continue
+        heading = float(math.atan2(pos_w[1] - start_base_pos_w[1], pos_w[0] - start_base_pos_w[0]))
+        if _angle_diff_abs(heading, start_base_yaw) > math.radians(85.0):
+            continue
         filtered.append((pos_w, yaw))
     if not filtered:
         return fallback_target, fallback_yaw, None, "MoMaGen-style target sampling failed; using fallback target offset."
@@ -758,6 +779,7 @@ def _resolve_target_pose_momagen(
     ranked = _rank_target_candidates(
         req=req,
         start_base_pos_w=start_base_pos_w,
+        start_base_yaw=start_base_yaw,
         candidates=filtered,
         fallback_target_pos_w=fallback_target,
     )
@@ -794,6 +816,7 @@ def _resolve_target_pose_momagen(
 def _waypoints_to_subgoals(
     waypoints_xy: list[tuple[float, float]],
     final_yaw_rad: float,
+    max_final_yaw_align_delta_rad: float = math.radians(25.0),
 ) -> list[tuple[list[float], bool]]:
     if len(waypoints_xy) < 2:
         return [([waypoints_xy[0][0], waypoints_xy[0][1], final_yaw_rad], True)]
@@ -804,9 +827,10 @@ def _waypoints_to_subgoals(
         cur_xy = waypoints_xy[i]
         heading = math.atan2(cur_xy[1] - prev_xy[1], cur_xy[0] - prev_xy[0])
         subgoals.append(([float(cur_xy[0]), float(cur_xy[1]), float(heading)], False))
-    # final in-place yaw align
+    # final in-place yaw align: skip large in-place spin for stability.
     end_xy = waypoints_xy[-1]
-    if abs(_wrap_angle_rad(final_yaw_rad - subgoals[-1][0][2])) > 1e-3:
+    final_delta = abs(_wrap_angle_rad(final_yaw_rad - subgoals[-1][0][2]))
+    if 1e-3 < final_delta <= float(max_final_yaw_align_delta_rad):
         subgoals.append(([float(end_xy[0]), float(end_xy[1]), float(final_yaw_rad)], True))
     return subgoals
 
@@ -860,6 +884,16 @@ def plan_walk_to_grasp(req: PlannerRequest) -> PlannerResult:
             start_base_pos_w=start_base_pos_w,
             start_base_yaw_rad=start_base_yaw,
         )
+
+    if req.sample_target_base_pose and req.target_base_pos_w is None:
+        stable_yaw = _stabilize_target_yaw(
+            start_base_pos_w=start_base_pos_w,
+            target_base_pos_w=target_pos_w,
+            raw_target_yaw=float(target_yaw),
+        )
+        if _angle_diff_abs(stable_yaw, target_yaw) > 1e-3:
+            target_yaw = stable_yaw
+            notes_parts.append("Target yaw stabilized to path heading to avoid large in-place turn.")
 
     target_xy = (float(target_pos_w[0]), float(target_pos_w[1]))
 

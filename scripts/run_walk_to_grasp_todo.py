@@ -79,6 +79,16 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--object", default="cracker_box")
     parser.add_argument("--pattern", default="lift_place", choices=["line", "circle", "lift_place"])
     parser.add_argument(
+        "--hoi-pickle",
+        default=None,
+        help="HOI pkl path (hoifhli/HOIDiNi). When set, Step 1 uses retarget instead of synthetic pattern.",
+    )
+    parser.add_argument(
+        "--spider-python",
+        default=os.environ.get("SPIDER_PYTHON", "/home/ubuntu/miniconda3/envs/spider/bin/python"),
+        help="Python with mujoco/scipy for retarget (spider conda env).",
+    )
+    parser.add_argument(
         "--traj-start-pos-w",
         default=None,
         help="Optional object trajectory start xyz in world frame (overrides scene preset).",
@@ -105,8 +115,8 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--walk-target-offset-frame", choices=["object", "world"], default="object")
     parser.add_argument("--walk-target-yaw-mode", choices=["face_object", "fixed", "base_yaw"], default="face_object")
     parser.add_argument("--walk-target-yaw-deg", type=float, default=0.0)
-    parser.add_argument("--walk-nav-max-lin-speed", type=float, default=0.22)
-    parser.add_argument("--walk-nav-max-ang-speed", type=float, default=0.55)
+    parser.add_argument("--walk-nav-max-lin-speed", type=float, default=0.16)
+    parser.add_argument("--walk-nav-max-ang-speed", type=float, default=0.35)
     parser.add_argument("--walk-nav-dt", type=float, default=0.02)
     parser.add_argument("--walk-pregrasp-hold-steps", type=int, default=25)
     parser.add_argument(
@@ -133,6 +143,10 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--right-wrist-quat-obj-wxyz", default="0.70710678,0.0,-0.70710678,0.0")
     parser.add_argument("--right-wrist-quat-control", choices=["follow_object", "constant_pelvis"], default="constant_pelvis")
     parser.add_argument("--right-wrist-quat-pelvis-wxyz", default="1.0,0.0,0.0,0.0")
+    parser.add_argument("--left-wrist-pos", default="0.18,0.22,0.20")
+    parser.add_argument("--left-wrist-quat-wxyz", default="1.0,0.0,0.0,0.0")
+    parser.add_argument("--right-wrist-nav-pos", default="0.18,-0.22,0.20")
+    parser.add_argument("--right-wrist-nav-quat-wxyz", default="1.0,0.0,0.0,0.0")
 
     parser.add_argument("--cedex-grasp-pt", default=None)
     parser.add_argument("--cedex-grasp-index", type=int, default=0)
@@ -212,28 +226,35 @@ def main() -> None:
             )
             raise
 
-    # Step 1: Build synthetic object trajectory.
+    # Step 1: Build object trajectory (synthetic pattern OR HOI retarget).
     def _step1_generate_traj():
-        cmd = [
-            python_exec,
-            os.path.join(pack_root, "isaac_replay", "generate_debug_object_traj.py"),
-            "--output",
-            kin_traj_path,
-            "--output-debug-json",
-            debug_traj_json,
-            "--object-name",
-            args.object,
-            "--pattern",
-            args.pattern,
-            "--scene-preset",
-            scene_preset,
-        ]
-        if args.traj_start_pos_w:
-            cmd.extend(["--start-pos-w", args.traj_start_pos_w])
-        if args.traj_end_pos_w:
-            cmd.extend(["--end-pos-w", args.traj_end_pos_w])
-        if args.traj_lift_height is not None:
-            cmd.extend(["--lift-height", f"{args.traj_lift_height}"])
+        if args.hoi_pickle:
+            # HOI retarget path
+            cmd = [
+                args.spider_python,
+                os.path.join(pack_root, "bridge", "hoi_to_g1_retarget.py"),
+                "--hoi-pickle", os.path.abspath(args.hoi_pickle),
+                "--output-npz", kin_traj_path,
+                "--output-debug-json", debug_traj_json,
+                "--scene", args.scene,
+                "--object-name-override", args.object,
+            ]
+        else:
+            cmd = [
+                python_exec,
+                os.path.join(pack_root, "isaac_replay", "generate_debug_object_traj.py"),
+                "--output", kin_traj_path,
+                "--output-debug-json", debug_traj_json,
+                "--object-name", args.object,
+                "--pattern", args.pattern,
+                "--scene-preset", scene_preset,
+            ]
+            if args.traj_start_pos_w:
+                cmd.extend(["--start-pos-w", args.traj_start_pos_w])
+            if args.traj_end_pos_w:
+                cmd.extend(["--end-pos-w", args.traj_end_pos_w])
+            if args.traj_lift_height is not None:
+                cmd.extend(["--lift-height", f"{args.traj_lift_height}"])
         code, out = _run_cmd(cmd)
         if code != 0:
             raise RuntimeError(out)
@@ -371,6 +392,10 @@ def main() -> None:
             "--right-wrist-quat-control",
             args.right_wrist_quat_control,
             f"--right-wrist-quat-pelvis-wxyz={args.right_wrist_quat_pelvis_wxyz}",
+            f"--left-wrist-pos={args.left_wrist_pos}",
+            f"--left-wrist-quat-wxyz={args.left_wrist_quat_wxyz}",
+            f"--right-wrist-nav-pos={args.right_wrist_nav_pos}",
+            f"--right-wrist-nav-quat-wxyz={args.right_wrist_nav_quat_wxyz}",
             "--left-hand-state",
             "0.0",
             "--right-hand-state",
@@ -392,7 +417,7 @@ def main() -> None:
         ]
         if args.replay_base_height is not None:
             cmd.extend(["--base-height", f"{args.replay_base_height}"])
-        if len(subgoals_for_replay) > 1:
+        if len(subgoals_for_replay) > 0:
             cmd.extend(["--walk-nav-subgoals-json", json.dumps(subgoals_for_replay)])
         if pregrasp_traj_npz is not None:
             cmd.extend(["--pregrasp-traj-npz", pregrasp_traj_npz])
@@ -458,6 +483,7 @@ def main() -> None:
                 "pre_step",
                 "--max-steps",
                 str(max_steps),
+                "--abort-on-reset",
                 args.scene,
                 "--object",
                 args.object,
