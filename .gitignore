@@ -14,6 +14,7 @@ __pycache__/
 
 # 输出目录
 output/
+artifacts/
 
 # 数据目录（通过 download_data.sh 获取）
 data/downloaded/

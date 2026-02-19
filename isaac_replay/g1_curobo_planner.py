@@ -103,6 +103,42 @@ class PlannerRequest:
     target_offset_frame: str
     target_yaw_mode: str
     target_yaw_deg: float
+    wrist_pos_w: tuple[float, float, float] | None = None
+    wrist_quat_wxyz_ik: tuple[float, float, float, float] | None = None
+
+
+@dataclass
+class IKResult:
+    reachable: bool
+    joint_solution: list[float] | None
+    position_error: float
+    reason: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class MotionGenResult:
+    success: bool
+    joint_trajectory: list[list[float]] | None  # [T, 7] joint angles
+    ee_pos_trajectory: list[list[float]] | None  # [T, 3] EE positions (pelvis frame)
+    ee_quat_trajectory: list[list[float]] | None  # [T, 4] EE quats wxyz (pelvis frame)
+    num_steps: int
+    motion_time: float
+    reason: str
+
+    def to_dict(self) -> dict[str, Any]:
+        d = asdict(self)
+        # Omit large trajectories from serialization, keep summary only
+        if d.get("joint_trajectory"):
+            d["joint_trajectory_len"] = len(d["joint_trajectory"])
+            del d["joint_trajectory"]
+        if d.get("ee_pos_trajectory"):
+            del d["ee_pos_trajectory"]
+        if d.get("ee_quat_trajectory"):
+            del d["ee_quat_trajectory"]
+        return d
 
 
 @dataclass
@@ -116,9 +152,15 @@ class PlannerResult:
     path_waypoints_xy: list[tuple[float, float]]
     navigation_subgoals: list[tuple[list[float], bool]]
     notes: str
+    ik_result: IKResult | None = None
+    motion_gen_result: MotionGenResult | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        d = asdict(self)
+        # Use custom serialization for motion_gen_result
+        if self.motion_gen_result is not None:
+            d["motion_gen_result"] = self.motion_gen_result.to_dict()
+        return d
 
 
 def _probe_curobo() -> tuple[bool, str]:
@@ -143,6 +185,240 @@ def _probe_curobo() -> tuple[bool, str]:
         return True, "imported from BODex source"
     except Exception as exc:
         return False, f"{type(exc).__name__}: {exc}"
+
+
+_G1_ARM_CONFIG_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "configs", "curobo", "g1_right_arm.yml"
+)
+
+
+def _scene_collision_cuboids(scene: str) -> list[dict]:
+    """Return 3-D cuboid obstacles for CuRobo world collision."""
+    if scene == "kitchen_pick_and_place":
+        return [
+            {"name": "table", "pose": [0.475, 0.0, 0.4, 1, 0, 0, 0],
+             "dims": [0.75, 1.24, 0.8]},
+        ]
+    if scene == "galileo_g1_locomanip_pick_and_place":
+        return [
+            {"name": "table", "pose": [0.65, 0.425, 0.4, 1, 0, 0, 0],
+             "dims": [0.90, 0.95, 0.8]},
+        ]
+    return []
+
+
+def _ik_check_reachability(
+    wrist_pos: tuple[float, float, float],
+    wrist_quat_wxyz: tuple[float, float, float, float],
+    scene: str = "",
+) -> IKResult:
+    """Use CuRobo IKSolver to check if a wrist pose is reachable by G1 right arm."""
+    try:
+        import torch
+        from curobo.wrap.reacher.ik_solver import IKSolver, IKSolverConfig
+        from curobo.types.math import Pose
+        from curobo.types.robot import RobotConfig
+
+        cfg_data, _ = _load_robot_cfg_data()
+        robot_cfg = RobotConfig.from_dict(cfg_data["robot_cfg"])
+
+        world_cfg = None
+        try:
+            world_cfg = _build_world_cfg(scene)
+        except Exception:
+            pass
+
+        # Try with scene collision; fall back to no collision if deps missing
+        try:
+            ik_config = IKSolverConfig.load_from_robot_config(
+                robot_cfg,
+                world_model=world_cfg,
+                num_seeds=32,
+                position_threshold=0.01,
+                rotation_threshold=0.05,
+            )
+        except Exception:
+            robot_cfg = RobotConfig.from_dict(cfg_data["robot_cfg"])
+            ik_config = IKSolverConfig.load_from_robot_config(
+                robot_cfg,
+                world_model=None,
+                num_seeds=32,
+                position_threshold=0.01,
+                rotation_threshold=0.05,
+                collision_checker_type=None,
+                self_collision_check=False,
+            )
+        ik_solver = IKSolver(ik_config)
+
+        # Convert wxyz -> xyzw for CuRobo Pose
+        w, x, y, z = wrist_quat_wxyz
+        goal = Pose.from_list(
+            [wrist_pos[0], wrist_pos[1], wrist_pos[2], w, x, y, z],
+            tensor_args=ik_solver.tensor_args,
+        )
+
+        result = ik_solver.solve_single(goal)
+        success = bool(result.success.item())
+        pos_err = float(result.position_error.min().item()) if hasattr(result, "position_error") else -1.0
+        q_sol = result.solution.squeeze().tolist() if success else None
+
+        return IKResult(success, q_sol, pos_err, "ok" if success else "no feasible IK solution")
+
+    except Exception as exc:
+        return IKResult(False, None, -1.0, f"{type(exc).__name__}: {exc}")
+
+
+def _load_robot_cfg_data() -> tuple[dict, str]:
+    """Load and patch g1_right_arm.yml, return (cfg_data, pack_root)."""
+    import yaml
+    cfg_path = os.path.abspath(_G1_ARM_CONFIG_PATH)
+    with open(cfg_path, "r") as f:
+        cfg_data = yaml.safe_load(f)
+    pack_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    urdf_path = cfg_data["robot_cfg"]["kinematics"]["urdf_path"]
+    cfg_data["robot_cfg"]["kinematics"]["urdf_path"] = urdf_path.replace(
+        "{PACK_ROOT}", pack_root
+    )
+    return cfg_data, pack_root
+
+
+def _build_world_cfg(scene: str):
+    """Build CuRobo WorldConfig from scene obstacles. Returns None if no obstacles."""
+    from curobo.geom.sdf.world import WorldConfig
+    cuboids = _scene_collision_cuboids(scene)
+    if not cuboids:
+        return None
+    world_dict: dict = {"cuboid": {}}
+    for cub in cuboids:
+        world_dict["cuboid"][cub["name"]] = {"pose": cub["pose"], "dims": cub["dims"]}
+    return WorldConfig.from_dict(world_dict)
+
+
+def plan_arm_trajectory(
+    wrist_pos: tuple[float, float, float],
+    wrist_quat_wxyz: tuple[float, float, float, float],
+    rest_joint_angles: list[float] | None = None,
+    scene: str = "",
+    interpolation_dt: float = 0.02,
+) -> MotionGenResult:
+    """Use CuRobo MotionGen to plan rest -> target wrist pose trajectory."""
+    try:
+        import torch
+        from curobo.wrap.reacher.motion_gen import (
+            MotionGen, MotionGenConfig, MotionGenPlanConfig,
+        )
+        from curobo.types.robot import JointState as CuJointState
+        from curobo.types.math import Pose
+
+        cfg_data, _ = _load_robot_cfg_data()
+        retract_cfg = cfg_data["robot_cfg"]["kinematics"]["cspace"]["retract_config"]
+        if rest_joint_angles is None:
+            rest_joint_angles = retract_cfg
+        n_dof = len(rest_joint_angles)
+
+        from curobo.types.robot import RobotConfig
+        robot_cfg = RobotConfig.from_dict(cfg_data["robot_cfg"])
+
+        # Try with collision world; fallback without
+        world_cfg = None
+        try:
+            world_cfg = _build_world_cfg(scene)
+        except Exception:
+            pass
+
+        try:
+            mg_config = MotionGenConfig.load_from_robot_config(
+                robot_cfg,
+                world_model=world_cfg,
+                num_ik_seeds=32,
+                num_trajopt_seeds=4,
+                interpolation_dt=interpolation_dt,
+                use_cuda_graph=False,
+                position_threshold=0.02,
+                rotation_threshold=0.1,
+            )
+        except Exception:
+            robot_cfg = RobotConfig.from_dict(cfg_data["robot_cfg"])
+            mg_config = MotionGenConfig.load_from_robot_config(
+                robot_cfg,
+                world_model=None,
+                num_ik_seeds=32,
+                num_trajopt_seeds=4,
+                interpolation_dt=interpolation_dt,
+                use_cuda_graph=False,
+                position_threshold=0.02,
+                rotation_threshold=0.1,
+            )
+
+        motion_gen = MotionGen(mg_config)
+        motion_gen.warmup(enable_graph=False, batch=1)
+
+        # Start state
+        device = motion_gen.tensor_args.device
+        dtype = motion_gen.tensor_args.dtype
+        start_q = torch.tensor(
+            [rest_joint_angles], device=device, dtype=dtype,
+        )
+        start_state = CuJointState.from_position(start_q)
+
+        # Goal pose
+        w, x, y, z = wrist_quat_wxyz
+        goal = Pose.from_list(
+            [wrist_pos[0], wrist_pos[1], wrist_pos[2], w, x, y, z],
+            tensor_args=motion_gen.tensor_args,
+        )
+
+        plan_cfg = MotionGenPlanConfig(
+            enable_graph=False,
+            enable_opt=True,
+            max_attempts=30,
+            timeout=10.0,
+        )
+        result = motion_gen.plan_single(start_state, goal, plan_cfg)
+
+        if not result.success.item():
+            return MotionGenResult(
+                success=False, joint_trajectory=None,
+                ee_pos_trajectory=None, ee_quat_trajectory=None,
+                num_steps=0, motion_time=0.0,
+                reason=f"MotionGen failed: {result.status}",
+            )
+
+        # Extract interpolated trajectory
+        joint_traj = result.get_interpolated_plan()  # JointState [T, n_dof]
+        joint_np = joint_traj.position.cpu().numpy()  # [T, 7]
+        T = joint_np.shape[0]
+        motion_time = float(result.motion_time) if hasattr(result, "motion_time") else T * interpolation_dt
+
+        # FK to get EE trajectory
+        ee_pos_list = None
+        ee_quat_list = None
+        try:
+            kin_state = motion_gen.compute_kinematics(joint_traj)
+            ee_pos_np = kin_state.ee_pos_seq.cpu().numpy()    # [T, 3]
+            ee_quat_np = kin_state.ee_quat_seq.cpu().numpy()  # [T, 4]
+            ee_pos_list = ee_pos_np.tolist()
+            ee_quat_list = ee_quat_np.tolist()
+        except Exception:
+            pass
+
+        return MotionGenResult(
+            success=True,
+            joint_trajectory=joint_np.tolist(),
+            ee_pos_trajectory=ee_pos_list,
+            ee_quat_trajectory=ee_quat_list,
+            num_steps=T,
+            motion_time=motion_time,
+            reason="ok",
+        )
+
+    except Exception as exc:
+        return MotionGenResult(
+            success=False, joint_trajectory=None,
+            ee_pos_trajectory=None, ee_quat_trajectory=None,
+            num_steps=0, motion_time=0.0,
+            reason=f"{type(exc).__name__}: {exc}",
+        )
 
 
 def _resolve_target_pose(req: PlannerRequest) -> tuple[np.ndarray, float]:
@@ -235,14 +511,32 @@ def plan_walk_to_grasp(req: PlannerRequest) -> PlannerResult:
                 f"Probe result: {curobo_reason}"
             )
         if curobo_available:
-            # Workspace currently lacks a validated G1 CuRobo robot config + world export bridge.
-            # We keep route planning deterministic and report fallback explicitly.
-            notes = (
-                "CuRobo import is available, but no validated G1 robot/world planning config was found. "
-                "Used deterministic open-loop path fallback."
-            )
+            notes = "CuRobo available. IK reachability check enabled."
         else:
             notes = f"CuRobo unavailable, fallback to open-loop path: {curobo_reason}"
+
+    # IK reachability check when CuRobo is available and wrist pose is provided
+    ik_result = None
+    if curobo_available and hasattr(req, "wrist_pos_w") and req.wrist_pos_w is not None:
+        ik_result = _ik_check_reachability(
+            req.wrist_pos_w, req.wrist_quat_wxyz_ik, scene=req.scene,
+        )
+        if ik_result.reachable:
+            notes += " IK check: REACHABLE."
+        else:
+            notes += f" IK check: UNREACHABLE ({ik_result.reason})."
+
+    # MotionGen trajectory planning when IK is reachable
+    mg_result = None
+    if curobo_available and ik_result is not None and ik_result.reachable and req.wrist_pos_w is not None:
+        mg_result = plan_arm_trajectory(
+            req.wrist_pos_w, req.wrist_quat_wxyz_ik, scene=req.scene,
+        )
+        if mg_result.success:
+            planner_used = "curobo"
+            notes += f" MotionGen: OK ({mg_result.num_steps} steps, {mg_result.motion_time:.3f}s)."
+        else:
+            notes += f" MotionGen: FAILED ({mg_result.reason}), fallback to open-loop."
 
     waypoints_xy = _plan_open_loop_path(req, target_xy)
     subgoals = _waypoints_to_subgoals(waypoints_xy, target_yaw)
@@ -257,6 +551,8 @@ def plan_walk_to_grasp(req: PlannerRequest) -> PlannerResult:
         path_waypoints_xy=[(float(x), float(y)) for x, y in waypoints_xy],
         navigation_subgoals=subgoals,
         notes=notes,
+        ik_result=ik_result,
+        motion_gen_result=mg_result,
     )
 
 

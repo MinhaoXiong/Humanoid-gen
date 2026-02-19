@@ -217,6 +217,15 @@ def main() -> None:
 
     # Step 3: CuRobo/open-loop walk planning.
     def _step3_plan_walk():
+        # Compute wrist pose in world frame for IK check
+        wrist_pos_obj = _parse_csv_floats(args.right_wrist_pos_obj, 3, "right_wrist_pos_obj")
+        wrist_quat_obj = _parse_csv_floats(args.right_wrist_quat_obj_wxyz, 4, "right_wrist_quat_obj_wxyz")
+        from isaac_replay.g1_curobo_planner import _quat_to_rotmat_wxyz, _normalize_quat_wxyz
+        obj_rot = _quat_to_rotmat_wxyz(obj_quat0)
+        wrist_pos_w = obj_pos0 + obj_rot @ wrist_pos_obj
+        # Approximate wrist orientation in world
+        wrist_quat_w = _normalize_quat_wxyz(wrist_quat_obj)
+
         req = PlannerRequest(
             planner=args.planner,
             strict_curobo=bool(args.strict_curobo),
@@ -234,15 +243,45 @@ def main() -> None:
             target_offset_frame=args.walk_target_offset_frame,
             target_yaw_mode=args.walk_target_yaw_mode,
             target_yaw_deg=float(args.walk_target_yaw_deg),
+            wrist_pos_w=tuple(_float_list(wrist_pos_w)),  # type: ignore[arg-type]
+            wrist_quat_wxyz_ik=tuple(_float_list(wrist_quat_w)),  # type: ignore[arg-type]
         )
         result = plan_walk_to_grasp(req)
-        return {"planner_result": result.to_dict()}
+        detail = {"planner_result": result.to_dict()}
+        if result.ik_result is not None:
+            detail["ik_reachable"] = result.ik_result.reachable
+            if not result.ik_result.reachable:
+                detail["ik_warning"] = (
+                    f"Wrist pose unreachable: {result.ik_result.reason}. "
+                    "Consider adjusting target offset or wrist pose."
+                )
+
+        # Save MotionGen trajectory as npz for build_arm_follow_replay
+        detail["_motion_gen_result"] = result.motion_gen_result
+        if result.motion_gen_result is not None and result.motion_gen_result.success:
+            detail["motion_gen_success"] = True
+            detail["motion_gen_steps"] = result.motion_gen_result.num_steps
+        else:
+            detail["motion_gen_success"] = False
+        return detail
 
     planner_detail = run_step(3, "plan_walk_to_grasp", _step3_plan_walk)
     planner_result = planner_detail["planner_result"]
     target_base_pos_w = planner_result["target_base_pos_w"]
     target_base_yaw_rad = float(planner_result["target_base_yaw_rad"])
     target_base_yaw_deg = float(math.degrees(target_base_yaw_rad))
+
+    # Save MotionGen EE trajectory as npz (already in torso/pelvis frame from CuRobo FK)
+    pregrasp_traj_npz = os.path.join(out_dir, "pregrasp_traj.npz")
+    mg_result = planner_detail.get("_motion_gen_result")
+    if mg_result is not None and mg_result.success and mg_result.ee_pos_trajectory:
+        np.savez(
+            pregrasp_traj_npz,
+            ee_pos=np.array(mg_result.ee_pos_trajectory, dtype=np.float64),
+            ee_quat_wxyz=np.array(mg_result.ee_quat_trajectory, dtype=np.float64),
+        )
+    else:
+        pregrasp_traj_npz = None  # No trajectory to pass
 
     # Step 4: Build replay actions with walk-to-grasp + arm-follow.
     # Convert planner subgoals to JSON for build_arm_follow_replay.py
@@ -291,6 +330,8 @@ def main() -> None:
         ]
         if len(subgoals_for_replay) > 1:
             cmd.extend(["--walk-nav-subgoals-json", json.dumps(subgoals_for_replay)])
+        if pregrasp_traj_npz is not None:
+            cmd.extend(["--pregrasp-traj-npz", pregrasp_traj_npz])
         if args.cedex_grasp_pt:
             cmd.extend(
                 [

@@ -1,0 +1,130 @@
+robot_cfg:
+  robot_color: [0.9, 0.8, 0.7, 1.0]
+  kinematics:
+    base_link: R_hand_base_link
+    use_root_pose: True
+    hand_pose_transfer_path: "hand_pose_transfer/inspire_hand.yml"
+    collision_link_names:
+      - R_hand_base_link
+      - R_thumb_proximal_base
+      - R_thumb_proximal
+      - R_thumb_intermediate
+      - R_thumb_distal
+      - R_thumb_tip
+      - R_index_proximal
+      - R_index_intermediate
+      - R_index_tip
+      - R_middle_proximal
+      - R_middle_intermediate
+      - R_middle_tip
+      - R_ring_proximal
+      - R_ring_intermediate
+      - R_ring_tip
+      - R_pinky_proximal
+      - R_pinky_intermediate
+      - R_pinky_tip
+    collision_sphere_buffer: 0.0
+    collision_spheres: spheres/inspire_hand.yml
+    ee_link: R_thumb_tip
+    link_names:
+      - R_thumb_tip
+      - R_index_tip
+      - R_middle_tip
+      - R_ring_tip
+      - R_pinky_tip
+    self_collision_buffer:
+      R_hand_base_link: 0.0
+      R_thumb_proximal_base: 0.0
+      R_thumb_proximal: 0.0
+      R_thumb_intermediate: 0.0
+      R_thumb_distal: 0.002
+      R_thumb_tip: 0.0
+      R_index_proximal: 0.0
+      R_index_intermediate: 0.002
+      R_index_tip: 0.0
+      R_middle_proximal: 0.0
+      R_middle_intermediate: 0.002
+      R_middle_tip: 0.0
+      R_ring_proximal: 0.0
+      R_ring_intermediate: 0.002
+      R_ring_tip: 0.0
+      R_pinky_proximal: 0.0
+      R_pinky_intermediate: 0.002
+      R_pinky_tip: 0.0
+    self_collision_ignore:
+      R_hand_base_link:
+        - R_thumb_proximal_base
+        - R_index_proximal
+        - R_middle_proximal
+        - R_ring_proximal
+        - R_pinky_proximal
+      R_thumb_proximal_base: [R_thumb_proximal]
+      R_thumb_proximal: [R_thumb_intermediate]
+      R_thumb_intermediate: [R_thumb_distal]
+      R_thumb_distal: [R_thumb_tip]
+      R_index_proximal: [R_index_intermediate]
+      R_index_intermediate: [R_index_tip]
+      R_middle_proximal: [R_middle_intermediate]
+      R_middle_intermediate: [R_middle_tip]
+      R_ring_proximal: [R_ring_intermediate]
+      R_ring_intermediate: [R_ring_tip]
+      R_pinky_proximal: [R_pinky_intermediate]
+      R_pinky_intermediate: [R_pinky_tip]
+    urdf_path: robot/inspire_hand_description/inspire_hand_right.urdf
+    asset_root_path: robot/inspire_hand_description
+    lock_joints:
+      R_thumb_intermediate_joint: 0.0
+      R_thumb_distal_joint: 0.0
+      R_index_intermediate_joint: 0.0
+      R_middle_intermediate_joint: 0.0
+      R_ring_intermediate_joint: 0.0
+      R_pinky_intermediate_joint: 0.0
+    cspace:
+      joint_names:
+        [
+          "R_thumb_proximal_yaw_joint",
+          "R_thumb_proximal_pitch_joint",
+          "R_index_proximal_joint",
+          "R_middle_proximal_joint",
+          "R_ring_proximal_joint",
+          "R_pinky_proximal_joint",
+        ]
+      cspace_distance_weight:
+        - 1.0
+        - 1.0
+        - 0.1
+        - 0.1
+        - 0.1
+        - 0.1
+      null_space_weight:
+        - 1.0
+        - 1.0
+        - 1.0
+        - 1.0
+        - 1.0
+        - 1.0
+      retract_config:
+        - 0.5
+        - 0.25
+        - 0.85
+        - 0.85
+        - 0.85
+        - 0.85
+      max_acceleration: 15.0
+      max_jerk: 500.0
+    mesh_link_names:
+      [
+        "R_hand_base_link",
+        "R_thumb_proximal_base",
+        "R_thumb_proximal",
+        "R_thumb_intermediate",
+        "R_thumb_distal",
+        "R_index_proximal",
+        "R_index_intermediate",
+        "R_middle_proximal",
+        "R_middle_intermediate",
+        "R_ring_proximal",
+        "R_ring_intermediate",
+        "R_pinky_proximal",
+        "R_pinky_intermediate",
+      ]

@@ -1,0 +1,75 @@
+robot_cfg:
+  kinematics:
+    urdf_path: "{PACK_ROOT}/configs/curobo/g1_right_arm.urdf"
+    base_link: torso_link
+    ee_link: right_wrist_yaw_link
+    link_names:
+      - right_wrist_yaw_link
+    collision_link_names:
+      - right_shoulder_pitch_link
+      - right_shoulder_roll_link
+      - right_shoulder_yaw_link
+      - right_elbow_link
+      - right_wrist_roll_link
+      - right_wrist_pitch_link
+      - right_wrist_yaw_link
+    collision_sphere_buffer: 0.005
+    collision_spheres:
+      right_shoulder_pitch_link:
+        - "center": [0.0, -0.04, -0.01]
+          "radius": 0.035
+      right_shoulder_roll_link:
+        - "center": [-0.004, -0.006, -0.03]
+          "radius": 0.035
+        - "center": [-0.004, -0.006, -0.07]
+          "radius": 0.035
+      right_shoulder_yaw_link:
+        - "center": [0.01, 0.0, -0.02]
+          "radius": 0.04
+        - "center": [0.01, 0.0, -0.06]
+          "radius": 0.04
+      right_elbow_link:
+        - "center": [0.02, 0.0, -0.01]
+          "radius": 0.035
+        - "center": [0.06, 0.0, -0.01]
+          "radius": 0.035
+        - "center": [0.09, 0.0, -0.01]
+          "radius": 0.03
+      right_wrist_roll_link:
+        - "center": [0.02, 0.0, 0.0]
+          "radius": 0.028
+      right_wrist_pitch_link:
+        - "center": [0.023, 0.0, 0.0]
+          "radius": 0.028
+      right_wrist_yaw_link:
+        - "center": [0.02, 0.0, 0.0]
+          "radius": 0.028
+    self_collision_buffer:
+      right_shoulder_pitch_link: 0.0
+      right_shoulder_roll_link: 0.0
+      right_shoulder_yaw_link: 0.0
+      right_elbow_link: 0.0
+      right_wrist_roll_link: 0.0
+      right_wrist_pitch_link: 0.0
+      right_wrist_yaw_link: 0.0
+    self_collision_ignore:
+      right_shoulder_pitch_link: [right_shoulder_roll_link]
+      right_shoulder_roll_link: [right_shoulder_yaw_link]
+      right_shoulder_yaw_link: [right_elbow_link]
+      right_elbow_link: [right_wrist_roll_link]
+      right_wrist_roll_link: [right_wrist_pitch_link]
+      right_wrist_pitch_link: [right_wrist_yaw_link]
+    cspace:
+      joint_names:
+        - right_shoulder_pitch_joint
+        - right_shoulder_roll_joint
+        - right_shoulder_yaw_joint
+        - right_elbow_joint
+        - right_wrist_roll_joint
+        - right_wrist_pitch_joint
+        - right_wrist_yaw_joint
+      retract_config: [0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0]
+      null_space_weight: [1.0, 1.0, 1.0, 1.0, 0.5, 0.5, 0.5]
+      cspace_distance_weight: [1.0, 1.0, 1.0, 1.0, 0.5, 0.5, 0.5]
+      max_acceleration: 15.0
+      max_jerk: 500.0

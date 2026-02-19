@@ -441,6 +441,11 @@ def _make_parser() -> argparse.ArgumentParser:
         help="JSON string of pre-computed nav subgoals from planner. Overrides internal straight-line nav.",
     )
     parser.add_argument(
+        "--pregrasp-traj-npz",
+        default=None,
+        help="Optional .npz with 'ee_pos' [T,3] and 'ee_quat_wxyz' [T,4] in pelvis frame for smooth rest->grasp transition.",
+    )
+    parser.add_argument(
         "--right-wrist-nav-pos",
         default="0.201,-0.145,0.101",
         help="Right wrist pelvis-frame xyz used during walk phase.",
@@ -591,7 +596,18 @@ def main() -> None:
             right_wrist_quat_pelvis[i] = _rotmat_to_quat_wxyz(r_hand_pelvis)
 
     nav_steps = int(nav_cmds.shape[0])
-    prefix_steps = nav_steps + pregrasp_hold_steps
+
+    # Load optional pregrasp trajectory (smooth rest -> grasp transition)
+    pregrasp_traj_pos = None
+    pregrasp_traj_quat = None
+    pregrasp_traj_steps = 0
+    if args.pregrasp_traj_npz and os.path.isfile(args.pregrasp_traj_npz):
+        pg_data = np.load(args.pregrasp_traj_npz)
+        pregrasp_traj_pos = pg_data["ee_pos"].astype(np.float64)    # [T, 3]
+        pregrasp_traj_quat = pg_data["ee_quat_wxyz"].astype(np.float64)  # [T, 4]
+        pregrasp_traj_steps = int(pregrasp_traj_pos.shape[0])
+
+    prefix_steps = nav_steps + pregrasp_hold_steps + pregrasp_traj_steps
     total_steps = prefix_steps + n_obj
 
     actions = np.zeros((total_steps, ACTION_DIM), dtype=np.float32)
@@ -602,13 +618,19 @@ def main() -> None:
     actions[:, BASE_HEIGHT_IDX] = np.float32(args.base_height)
     actions[:, TORSO_RPY_START_IDX:TORSO_RPY_END_IDX] = torso_rpy.astype(np.float32)
 
-    if prefix_steps > 0:
-        actions[:prefix_steps, RIGHT_WRIST_POS_START_IDX:RIGHT_WRIST_POS_END_IDX] = right_wrist_nav_pos.astype(np.float32)
-        actions[
-            :prefix_steps, RIGHT_WRIST_QUAT_START_IDX:RIGHT_WRIST_QUAT_END_IDX
-        ] = right_wrist_nav_quat.astype(np.float32)
+    hold_end = nav_steps + pregrasp_hold_steps
+    if hold_end > 0:
+        actions[:hold_end, RIGHT_WRIST_POS_START_IDX:RIGHT_WRIST_POS_END_IDX] = right_wrist_nav_pos.astype(np.float32)
+        actions[:hold_end, RIGHT_WRIST_QUAT_START_IDX:RIGHT_WRIST_QUAT_END_IDX] = right_wrist_nav_quat.astype(np.float32)
     if nav_steps > 0:
         actions[:nav_steps, NAV_CMD_START_IDX:NAV_CMD_END_IDX] = nav_cmds.astype(np.float32)
+
+    # Insert pregrasp trajectory (smooth rest -> grasp transition)
+    if pregrasp_traj_steps > 0:
+        pg_start = hold_end
+        pg_end = hold_end + pregrasp_traj_steps
+        actions[pg_start:pg_end, RIGHT_WRIST_POS_START_IDX:RIGHT_WRIST_POS_END_IDX] = pregrasp_traj_pos.astype(np.float32)
+        actions[pg_start:pg_end, RIGHT_WRIST_QUAT_START_IDX:RIGHT_WRIST_QUAT_END_IDX] = pregrasp_traj_quat.astype(np.float32)
 
     arm_start = prefix_steps
     actions[arm_start:, RIGHT_WRIST_POS_START_IDX:RIGHT_WRIST_POS_END_IDX] = right_wrist_pos_pelvis.astype(np.float32)
@@ -643,6 +665,7 @@ def main() -> None:
             "total_steps": int(total_steps),
             "nav_steps": int(nav_steps),
             "pregrasp_hold_steps": int(pregrasp_hold_steps),
+            "pregrasp_traj_steps": int(pregrasp_traj_steps),
             "arm_follow_steps": int(n_obj),
             "recommended_kin_start_step": int(prefix_steps),
         },

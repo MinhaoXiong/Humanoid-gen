@@ -1,0 +1,79 @@
+collision_spheres:
+  R_hand_base_link:
+    - "center": [0.0, -0.04, 0.0]
+      "radius": 0.025
+    - "center": [0.0, -0.07, 0.0]
+      "radius": 0.025
+    - "center": [0.0, -0.10, 0.0]
+      "radius": 0.025
+    - "center": [0.0, -0.13, 0.0]
+      "radius": 0.025
+  R_thumb_proximal_base:
+    - "center": [0.0, 0.0, 0.0]
+      "radius": 0.01
+  R_thumb_proximal:
+    - "center": [0.02, 0.015, 0.0]
+      "radius": 0.012
+    - "center": [0.04, 0.03, 0.0]
+      "radius": 0.012
+  R_thumb_intermediate:
+    - "center": [0.01, 0.0, 0.0]
+      "radius": 0.01
+  R_thumb_distal:
+    - "center": [0.008, 0.005, 0.0]
+      "radius": 0.01
+  R_thumb_tip:
+    - "center": [0.0, 0.0, 0.0]
+      "radius": 0.008
+  R_index_proximal:
+    - "center": [0.0, 0.01, 0.0]
+      "radius": 0.01
+    - "center": [0.0, 0.025, 0.0]
+      "radius": 0.01
+  R_index_intermediate:
+    - "center": [0.0, 0.01, 0.0]
+      "radius": 0.01
+    - "center": [0.0, 0.03, 0.0]
+      "radius": 0.01
+  R_index_tip:
+    - "center": [0.0, 0.0, 0.0]
+      "radius": 0.008
+  R_middle_proximal:
+    - "center": [0.0, 0.01, 0.0]
+      "radius": 0.01
+    - "center": [0.0, 0.025, 0.0]
+      "radius": 0.01
+  R_middle_intermediate:
+    - "center": [0.0, 0.01, 0.0]
+      "radius": 0.01
+    - "center": [0.0, 0.035, 0.0]
+      "radius": 0.01
+  R_middle_tip:
+    - "center": [0.0, 0.0, 0.0]
+      "radius": 0.008
+  R_ring_proximal:
+    - "center": [0.0, 0.01, 0.0]
+      "radius": 0.01
+    - "center": [0.0, 0.025, 0.0]
+      "radius": 0.01
+  R_ring_intermediate:
+    - "center": [0.0, 0.01, 0.0]
+      "radius": 0.01
+    - "center": [0.0, 0.03, 0.0]
+      "radius": 0.01
+  R_ring_tip:
+    - "center": [0.0, 0.0, 0.0]
+      "radius": 0.008
+  R_pinky_proximal:
+    - "center": [0.0, 0.01, 0.0]
+      "radius": 0.01
+    - "center": [0.0, 0.025, 0.0]
+      "radius": 0.01
+  R_pinky_intermediate:
+    - "center": [0.0, 0.01, 0.0]
+      "radius": 0.009
+    - "center": [0.0, 0.025, 0.0]
+      "radius": 0.009
+  R_pinky_tip:
+    - "center": [0.0, 0.0, 0.0]
+      "radius": 0.007
