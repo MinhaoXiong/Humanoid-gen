@@ -51,6 +51,10 @@ def _wrap_angle_rad(a: float) -> float:
     return float((a + math.pi) % (2.0 * math.pi) - math.pi)
 
 
+def _angle_diff_abs(a: float, b: float) -> float:
+    return abs(_wrap_angle_rad(float(a) - float(b)))
+
+
 def _rotz(yaw_rad: float) -> np.ndarray:
     c = math.cos(float(yaw_rad))
     s = math.sin(float(yaw_rad))
@@ -96,7 +100,7 @@ def _point_in_aabb_2d(
     )
 
 
-def _is_xy_collision_free(scene: str, xy: tuple[float, float], margin: float = 0.20) -> bool:
+def _is_xy_collision_free(scene: str, xy: tuple[float, float], margin: float = 0.08) -> bool:
     # Similar to MoMaGen's base-pose hack: avoid sampling base on the far side of the table.
     if scene == "kitchen_pick_and_place" and xy[0] > 1.0:
         return False
@@ -116,6 +120,8 @@ def _sample_base_pose_candidates(
     dist_max: float,
     attempts: int,
     seed: int,
+    angle_center_rad: float | None = None,
+    angle_half_width_rad: float = math.pi,
 ) -> list[tuple[np.ndarray, float]]:
     lo = float(min(dist_min, dist_max))
     hi = float(max(dist_min, dist_max))
@@ -124,9 +130,13 @@ def _sample_base_pose_candidates(
     lo = max(lo, 1e-3)
     rng = np.random.default_rng(int(seed))
     out: list[tuple[np.ndarray, float]] = []
+    half = max(1e-3, min(float(angle_half_width_rad), math.pi))
     for _ in range(max(int(attempts), 1)):
         dist = float(rng.uniform(lo, hi))
-        angle = float(rng.uniform(-math.pi, math.pi))
+        if angle_center_rad is None:
+            angle = float(rng.uniform(-math.pi, math.pi))
+        else:
+            angle = float(angle_center_rad + rng.uniform(-half, half))
         x = float(anchor_xy[0] + dist * math.cos(angle))
         y = float(anchor_xy[1] + dist * math.sin(angle))
         yaw = float(math.atan2(anchor_xy[1] - y, anchor_xy[0] - x))
@@ -152,30 +162,47 @@ def _rank_target_candidates(
     req: "PlannerRequest",
     start_base_pos_w: np.ndarray,
     candidates: list[tuple[np.ndarray, float]],
+    fallback_target_pos_w: np.ndarray | None = None,
 ) -> list[tuple[np.ndarray, float]]:
-    if req.wrist_pos_w is None or req.wrist_quat_wxyz_ik is None:
-        return candidates
+    wrist_pos_w = np.asarray(req.wrist_pos_w, dtype=np.float64) if req.wrist_pos_w is not None else None
+    wrist_quat_w = np.asarray(req.wrist_quat_wxyz_ik, dtype=np.float64) if req.wrist_quat_wxyz_ik is not None else None
+    axis_angle = _table_outward_axis_angle(
+        req.scene,
+        (float(req.object_pos_w[0]), float(req.object_pos_w[1])),
+    )
+    tangent_vec = None
+    if axis_angle is not None:
+        tangent_vec = np.array([-math.sin(axis_angle), math.cos(axis_angle)], dtype=np.float64)
 
-    wrist_pos_w = np.asarray(req.wrist_pos_w, dtype=np.float64)
-    wrist_quat_w = np.asarray(req.wrist_quat_wxyz_ik, dtype=np.float64)
     scored: list[tuple[float, np.ndarray, float]] = []
     for cand_pos_w, cand_yaw in candidates:
         nav_dist = float(np.linalg.norm(cand_pos_w[:2] - start_base_pos_w[:2]))
         if nav_dist < float(req.target_min_travel_dist):
             continue
-        wrist_pos_b, _ = _wrist_goal_in_base_frame(
-            wrist_pos_w=wrist_pos_w,
-            wrist_quat_wxyz=wrist_quat_w,
-            base_pos_w=cand_pos_w,
-            base_yaw_rad=cand_yaw,
-        )
-        # Heuristic: prefer moderate forward reach and small lateral/z offsets.
-        score = (
-            2.0 * abs(float(wrist_pos_b[0]) - 0.24)
-            + 1.2 * abs(float(wrist_pos_b[1]))
-            + 0.8 * abs(float(wrist_pos_b[2]) - 0.10)
-            + 3.0 * max(0.0, -float(wrist_pos_b[0]))
-        )
+        heading = float(math.atan2(cand_pos_w[1] - start_base_pos_w[1], cand_pos_w[0] - start_base_pos_w[0]))
+        yaw_mismatch = _angle_diff_abs(cand_yaw, heading)
+        score = 4.0 * yaw_mismatch + 2.0 * max(0.0, yaw_mismatch - math.radians(35.0))
+        if tangent_vec is not None:
+            disp = cand_pos_w[:2] - start_base_pos_w[:2]
+            tangent_shift = abs(float(np.dot(disp, tangent_vec)))
+            score += 2.5 * tangent_shift
+        if fallback_target_pos_w is not None:
+            score += 0.7 * float(np.linalg.norm(cand_pos_w[:2] - fallback_target_pos_w[:2]))
+
+        if wrist_pos_w is not None and wrist_quat_w is not None:
+            wrist_pos_b, _ = _wrist_goal_in_base_frame(
+                wrist_pos_w=wrist_pos_w,
+                wrist_quat_wxyz=wrist_quat_w,
+                base_pos_w=cand_pos_w,
+                base_yaw_rad=cand_yaw,
+            )
+            # Heuristic: prefer moderate forward reach and small lateral/z offsets.
+            score += (
+                2.0 * abs(float(wrist_pos_b[0]) - 0.24)
+                + 1.2 * abs(float(wrist_pos_b[1]))
+                + 0.8 * abs(float(wrist_pos_b[2]) - 0.10)
+                + 3.0 * max(0.0, -float(wrist_pos_b[0]))
+            )
         scored.append((score, cand_pos_w, cand_yaw))
 
     if not scored:
@@ -221,6 +248,33 @@ def _scene_obstacles(scene: str) -> list[tuple[tuple[float, float], tuple[float,
     return []
 
 
+def _table_outward_axis_angle(scene: str, anchor_xy: tuple[float, float]) -> float | None:
+    """Return outward normal direction angle from nearest table edge to anchor."""
+    obstacles = _scene_obstacles(scene)
+    if not obstacles:
+        return None
+    bmin, bmax = obstacles[0]
+    ax = float(anchor_xy[0])
+    ay = float(anchor_xy[1])
+
+    cx = min(max(ax, bmin[0]), bmax[0])
+    cy = min(max(ay, bmin[1]), bmax[1])
+    vx = ax - cx
+    vy = ay - cy
+    if math.hypot(vx, vy) > 1e-6:
+        return float(math.atan2(vy, vx))
+
+    # Anchor is on/inside table projection: choose nearest edge outward normal.
+    edge_dist_and_angle = [
+        (ax - bmin[0], math.pi),        # left edge outward (-x)
+        (bmax[0] - ax, 0.0),            # right edge outward (+x)
+        (ay - bmin[1], -0.5 * math.pi), # bottom edge outward (-y)
+        (bmax[1] - ay, 0.5 * math.pi),  # top edge outward (+y)
+    ]
+    edge_dist_and_angle.sort(key=lambda item: float(item[0]))
+    return float(edge_dist_and_angle[0][1])
+
+
 @dataclass
 class PlannerRequest:
     planner: str
@@ -248,6 +302,7 @@ class PlannerRequest:
     target_sample_attempts: int = 64
     target_sample_seed: int = 1
     target_min_travel_dist: float = 0.25
+    target_max_travel_dist: float = 1.10
 
 
 @dataclass
@@ -628,6 +683,14 @@ def _resolve_start_pose_momagen(req: PlannerRequest) -> tuple[np.ndarray, float,
     obj_pos_w = np.asarray(req.object_pos_w, dtype=np.float64)
     fallback_pos = np.asarray(req.start_base_pos_w, dtype=np.float64)
     fallback_yaw = float(req.start_base_yaw_rad)
+    angle_center = _table_outward_axis_angle(req.scene, (float(obj_pos_w[0]), float(obj_pos_w[1])))
+    if angle_center is None:
+        v_fallback = fallback_pos[:2] - obj_pos_w[:2]
+        if float(np.linalg.norm(v_fallback)) > 1e-6:
+            angle_center = float(math.atan2(v_fallback[1], v_fallback[0]))
+        else:
+            angle_center = math.pi
+    angle_half = math.radians(30.0 if req.scene == "kitchen_pick_and_place" else 35.0)
     candidates = _sample_base_pose_candidates(
         anchor_xy=(float(obj_pos_w[0]), float(obj_pos_w[1])),
         z=float(fallback_pos[2]),
@@ -635,10 +698,17 @@ def _resolve_start_pose_momagen(req: PlannerRequest) -> tuple[np.ndarray, float,
         dist_max=float(req.start_sample_dist_max),
         attempts=int(req.start_sample_attempts),
         seed=int(req.start_sample_seed),
+        angle_center_rad=angle_center,
+        angle_half_width_rad=angle_half,
     )
+    filtered: list[tuple[np.ndarray, float]] = []
     for pos_w, yaw in candidates:
         if _is_xy_collision_free(req.scene, (float(pos_w[0]), float(pos_w[1]))):
-            return pos_w, float(yaw), "MoMaGen-style start pose sampled."
+            filtered.append((pos_w, yaw))
+    if filtered:
+        filtered.sort(key=lambda cand: float(np.linalg.norm(cand[0][:2] - fallback_pos[:2])))
+        pos_w, yaw = filtered[0]
+        return pos_w, float(yaw), "MoMaGen-style start pose sampled in table-normal fan sector."
     return fallback_pos, fallback_yaw, "MoMaGen-style start sampling failed; using configured start pose."
 
 
@@ -654,6 +724,14 @@ def _resolve_target_pose_momagen(
         start_base_pos_w=start_base_pos_w,
         start_base_yaw_rad=float(start_base_yaw),
     )
+    angle_center = _table_outward_axis_angle(req.scene, (float(anchor[0]), float(anchor[1])))
+    if angle_center is None:
+        v_fallback = fallback_target[:2] - anchor[:2]
+        if float(np.linalg.norm(v_fallback)) > 1e-6:
+            angle_center = float(math.atan2(v_fallback[1], v_fallback[0]))
+        else:
+            angle_center = math.pi
+    angle_half = math.radians(30.0 if req.scene == "kitchen_pick_and_place" else 35.0)
     candidates = _sample_base_pose_candidates(
         anchor_xy=(float(anchor[0]), float(anchor[1])),
         z=float(start_base_pos_w[2]),
@@ -661,6 +739,8 @@ def _resolve_target_pose_momagen(
         dist_max=float(req.target_sample_dist_max),
         attempts=int(req.target_sample_attempts),
         seed=int(req.target_sample_seed),
+        angle_center_rad=angle_center,
+        angle_half_width_rad=angle_half,
     )
     filtered: list[tuple[np.ndarray, float]] = []
     for pos_w, yaw in candidates:
@@ -669,11 +749,18 @@ def _resolve_target_pose_momagen(
         nav_dist = float(np.linalg.norm(pos_w[:2] - start_base_pos_w[:2]))
         if nav_dist < float(req.target_min_travel_dist):
             continue
+        if float(req.target_max_travel_dist) > float(req.target_min_travel_dist) and nav_dist > float(req.target_max_travel_dist):
+            continue
         filtered.append((pos_w, yaw))
     if not filtered:
         return fallback_target, fallback_yaw, None, "MoMaGen-style target sampling failed; using fallback target offset."
 
-    ranked = _rank_target_candidates(req=req, start_base_pos_w=start_base_pos_w, candidates=filtered)
+    ranked = _rank_target_candidates(
+        req=req,
+        start_base_pos_w=start_base_pos_w,
+        candidates=filtered,
+        fallback_target_pos_w=fallback_target,
+    )
     if not curobo_available or req.wrist_pos_w is None or req.wrist_quat_wxyz_ik is None:
         pos_w, yaw = ranked[0]
         return pos_w, yaw, None, "MoMaGen-style target selected by geometric ranking."
@@ -871,4 +958,5 @@ def request_from_args(args: Any) -> PlannerRequest:
         target_sample_attempts=int(getattr(args, "momagen_sample_attempts", 64)),
         target_sample_seed=int(getattr(args, "momagen_sample_seed", 1)) + 17,
         target_min_travel_dist=float(getattr(args, "momagen_min_travel_dist", 0.25)),
+        target_max_travel_dist=float(getattr(args, "momagen_max_travel_dist", 1.10)),
     )

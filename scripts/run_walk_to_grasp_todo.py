@@ -119,6 +119,7 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--momagen-target-dist-min", type=float, default=0.4)
     parser.add_argument("--momagen-target-dist-max", type=float, default=1.0)
     parser.add_argument("--momagen-min-travel-dist", type=float, default=0.25)
+    parser.add_argument("--momagen-max-travel-dist", type=float, default=1.10)
     parser.add_argument("--momagen-sample-attempts", type=int, default=40)
     parser.add_argument("--momagen-sample-seed", type=int, default=13)
     parser.add_argument(
@@ -296,6 +297,7 @@ def main() -> None:
             target_sample_attempts=int(args.momagen_sample_attempts),
             target_sample_seed=int(args.momagen_sample_seed) + 17,
             target_min_travel_dist=float(args.momagen_min_travel_dist),
+            target_max_travel_dist=float(args.momagen_max_travel_dist),
         )
         result = plan_walk_to_grasp(req)
         detail = {"planner_result": result.to_dict()}
