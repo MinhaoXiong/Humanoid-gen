@@ -51,6 +51,138 @@ def _wrap_angle_rad(a: float) -> float:
     return float((a + math.pi) % (2.0 * math.pi) - math.pi)
 
 
+def _rotz(yaw_rad: float) -> np.ndarray:
+    c = math.cos(float(yaw_rad))
+    s = math.sin(float(yaw_rad))
+    return np.array(
+        [
+            [c, -s, 0.0],
+            [s, c, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+
+
+def _quat_conj_wxyz(q: np.ndarray) -> np.ndarray:
+    qn = _normalize_quat_wxyz(q)
+    return np.array([qn[0], -qn[1], -qn[2], -qn[3]], dtype=np.float64)
+
+
+def _quat_mul_wxyz(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
+    w1, x1, y1, z1 = _normalize_quat_wxyz(q1)
+    w2, x2, y2, z2 = _normalize_quat_wxyz(q2)
+    out = np.array(
+        [
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+        ],
+        dtype=np.float64,
+    )
+    return _normalize_quat_wxyz(out)
+
+
+def _point_in_aabb_2d(
+    p: tuple[float, float],
+    aabb_min: tuple[float, float],
+    aabb_max: tuple[float, float],
+    margin: float = 0.0,
+) -> bool:
+    return (
+        (aabb_min[0] - margin) <= p[0] <= (aabb_max[0] + margin)
+        and (aabb_min[1] - margin) <= p[1] <= (aabb_max[1] + margin)
+    )
+
+
+def _is_xy_collision_free(scene: str, xy: tuple[float, float], margin: float = 0.20) -> bool:
+    # Similar to MoMaGen's base-pose hack: avoid sampling base on the far side of the table.
+    if scene == "kitchen_pick_and_place" and xy[0] > 1.0:
+        return False
+    if scene == "galileo_g1_locomanip_pick_and_place" and xy[0] > 1.25:
+        return False
+    obstacles = _scene_obstacles(scene)
+    for bmin, bmax in obstacles:
+        if _point_in_aabb_2d(xy, bmin, bmax, margin=margin):
+            return False
+    return True
+
+
+def _sample_base_pose_candidates(
+    anchor_xy: tuple[float, float],
+    z: float,
+    dist_min: float,
+    dist_max: float,
+    attempts: int,
+    seed: int,
+) -> list[tuple[np.ndarray, float]]:
+    lo = float(min(dist_min, dist_max))
+    hi = float(max(dist_min, dist_max))
+    if hi <= 1e-6:
+        return []
+    lo = max(lo, 1e-3)
+    rng = np.random.default_rng(int(seed))
+    out: list[tuple[np.ndarray, float]] = []
+    for _ in range(max(int(attempts), 1)):
+        dist = float(rng.uniform(lo, hi))
+        angle = float(rng.uniform(-math.pi, math.pi))
+        x = float(anchor_xy[0] + dist * math.cos(angle))
+        y = float(anchor_xy[1] + dist * math.sin(angle))
+        yaw = float(math.atan2(anchor_xy[1] - y, anchor_xy[0] - x))
+        out.append((np.array([x, y, float(z)], dtype=np.float64), yaw))
+    return out
+
+
+def _wrist_goal_in_base_frame(
+    wrist_pos_w: np.ndarray,
+    wrist_quat_wxyz: np.ndarray,
+    base_pos_w: np.ndarray,
+    base_yaw_rad: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    r_bw = _rotz(base_yaw_rad)
+    p_b = r_bw.T @ (wrist_pos_w - base_pos_w)
+    q_bw = np.array([math.cos(0.5 * base_yaw_rad), 0.0, 0.0, math.sin(0.5 * base_yaw_rad)], dtype=np.float64)
+    q_wb = _quat_conj_wxyz(q_bw)
+    q_b = _quat_mul_wxyz(q_wb, wrist_quat_wxyz)
+    return p_b, q_b
+
+
+def _rank_target_candidates(
+    req: "PlannerRequest",
+    start_base_pos_w: np.ndarray,
+    candidates: list[tuple[np.ndarray, float]],
+) -> list[tuple[np.ndarray, float]]:
+    if req.wrist_pos_w is None or req.wrist_quat_wxyz_ik is None:
+        return candidates
+
+    wrist_pos_w = np.asarray(req.wrist_pos_w, dtype=np.float64)
+    wrist_quat_w = np.asarray(req.wrist_quat_wxyz_ik, dtype=np.float64)
+    scored: list[tuple[float, np.ndarray, float]] = []
+    for cand_pos_w, cand_yaw in candidates:
+        nav_dist = float(np.linalg.norm(cand_pos_w[:2] - start_base_pos_w[:2]))
+        if nav_dist < float(req.target_min_travel_dist):
+            continue
+        wrist_pos_b, _ = _wrist_goal_in_base_frame(
+            wrist_pos_w=wrist_pos_w,
+            wrist_quat_wxyz=wrist_quat_w,
+            base_pos_w=cand_pos_w,
+            base_yaw_rad=cand_yaw,
+        )
+        # Heuristic: prefer moderate forward reach and small lateral/z offsets.
+        score = (
+            2.0 * abs(float(wrist_pos_b[0]) - 0.24)
+            + 1.2 * abs(float(wrist_pos_b[1]))
+            + 0.8 * abs(float(wrist_pos_b[2]) - 0.10)
+            + 3.0 * max(0.0, -float(wrist_pos_b[0]))
+        )
+        scored.append((score, cand_pos_w, cand_yaw))
+
+    if not scored:
+        return candidates
+    scored.sort(key=lambda x: x[0])
+    return [(pos, yaw) for _, pos, yaw in scored]
+
 def _line_intersects_aabb_2d(
     p0: tuple[float, float],
     p1: tuple[float, float],
@@ -105,6 +237,17 @@ class PlannerRequest:
     target_yaw_deg: float
     wrist_pos_w: tuple[float, float, float] | None = None
     wrist_quat_wxyz_ik: tuple[float, float, float, float] | None = None
+    sample_start_base_pose: bool = False
+    start_sample_dist_min: float = 0.4
+    start_sample_dist_max: float = 1.0
+    start_sample_attempts: int = 32
+    start_sample_seed: int = 0
+    sample_target_base_pose: bool = False
+    target_sample_dist_min: float = 0.4
+    target_sample_dist_max: float = 1.0
+    target_sample_attempts: int = 64
+    target_sample_seed: int = 1
+    target_min_travel_dist: float = 0.25
 
 
 @dataclass
@@ -147,6 +290,8 @@ class PlannerResult:
     planner_used: str
     curobo_available: bool
     curobo_reason: str
+    start_base_pos_w: tuple[float, float, float]
+    start_base_yaw_rad: float
     target_base_pos_w: tuple[float, float, float]
     target_base_yaw_rad: float
     path_waypoints_xy: list[tuple[float, float]]
@@ -421,8 +566,12 @@ def plan_arm_trajectory(
         )
 
 
-def _resolve_target_pose(req: PlannerRequest) -> tuple[np.ndarray, float]:
-    start = np.asarray(req.start_base_pos_w, dtype=np.float64)
+def _resolve_target_pose(
+    req: PlannerRequest,
+    start_base_pos_w: np.ndarray,
+    start_base_yaw_rad: float,
+) -> tuple[np.ndarray, float]:
+    start = np.asarray(start_base_pos_w, dtype=np.float64)
     obj_pos = np.asarray(req.object_pos_w, dtype=np.float64)
     obj_quat = np.asarray(req.object_quat_wxyz, dtype=np.float64)
 
@@ -440,14 +589,18 @@ def _resolve_target_pose(req: PlannerRequest) -> tuple[np.ndarray, float]:
     if req.target_yaw_mode == "face_object":
         yaw = math.atan2(obj_pos[1] - target[1], obj_pos[0] - target[0])
     elif req.target_yaw_mode == "base_yaw":
-        yaw = float(req.start_base_yaw_rad)
+        yaw = float(start_base_yaw_rad)
     else:
         yaw = math.radians(float(req.target_yaw_deg))
     return target, float(yaw)
 
 
-def _plan_open_loop_path(req: PlannerRequest, target_xy: tuple[float, float]) -> list[tuple[float, float]]:
-    start_xy = (float(req.start_base_pos_w[0]), float(req.start_base_pos_w[1]))
+def _plan_open_loop_path(
+    req: PlannerRequest,
+    start_base_pos_w: np.ndarray,
+    target_xy: tuple[float, float],
+) -> list[tuple[float, float]]:
+    start_xy = (float(start_base_pos_w[0]), float(start_base_pos_w[1]))
     if req.scene not in {"kitchen_pick_and_place", "galileo_g1_locomanip_pick_and_place"}:
         return [start_xy, target_xy]
 
@@ -469,6 +622,86 @@ def _plan_open_loop_path(req: PlannerRequest, target_xy: tuple[float, float]) ->
     mid1 = (start_xy[0], y_route)
     mid2 = (target_xy[0], y_route)
     return [start_xy, mid1, mid2, target_xy]
+
+
+def _resolve_start_pose_momagen(req: PlannerRequest) -> tuple[np.ndarray, float, str]:
+    obj_pos_w = np.asarray(req.object_pos_w, dtype=np.float64)
+    fallback_pos = np.asarray(req.start_base_pos_w, dtype=np.float64)
+    fallback_yaw = float(req.start_base_yaw_rad)
+    candidates = _sample_base_pose_candidates(
+        anchor_xy=(float(obj_pos_w[0]), float(obj_pos_w[1])),
+        z=float(fallback_pos[2]),
+        dist_min=float(req.start_sample_dist_min),
+        dist_max=float(req.start_sample_dist_max),
+        attempts=int(req.start_sample_attempts),
+        seed=int(req.start_sample_seed),
+    )
+    for pos_w, yaw in candidates:
+        if _is_xy_collision_free(req.scene, (float(pos_w[0]), float(pos_w[1]))):
+            return pos_w, float(yaw), "MoMaGen-style start pose sampled."
+    return fallback_pos, fallback_yaw, "MoMaGen-style start sampling failed; using configured start pose."
+
+
+def _resolve_target_pose_momagen(
+    req: PlannerRequest,
+    start_base_pos_w: np.ndarray,
+    start_base_yaw: float,
+    curobo_available: bool,
+) -> tuple[np.ndarray, float, IKResult | None, str]:
+    anchor = np.asarray(req.wrist_pos_w if req.wrist_pos_w is not None else req.object_pos_w, dtype=np.float64)
+    fallback_target, fallback_yaw = _resolve_target_pose(
+        req=req,
+        start_base_pos_w=start_base_pos_w,
+        start_base_yaw_rad=float(start_base_yaw),
+    )
+    candidates = _sample_base_pose_candidates(
+        anchor_xy=(float(anchor[0]), float(anchor[1])),
+        z=float(start_base_pos_w[2]),
+        dist_min=float(req.target_sample_dist_min),
+        dist_max=float(req.target_sample_dist_max),
+        attempts=int(req.target_sample_attempts),
+        seed=int(req.target_sample_seed),
+    )
+    filtered: list[tuple[np.ndarray, float]] = []
+    for pos_w, yaw in candidates:
+        if not _is_xy_collision_free(req.scene, (float(pos_w[0]), float(pos_w[1]))):
+            continue
+        nav_dist = float(np.linalg.norm(pos_w[:2] - start_base_pos_w[:2]))
+        if nav_dist < float(req.target_min_travel_dist):
+            continue
+        filtered.append((pos_w, yaw))
+    if not filtered:
+        return fallback_target, fallback_yaw, None, "MoMaGen-style target sampling failed; using fallback target offset."
+
+    ranked = _rank_target_candidates(req=req, start_base_pos_w=start_base_pos_w, candidates=filtered)
+    if not curobo_available or req.wrist_pos_w is None or req.wrist_quat_wxyz_ik is None:
+        pos_w, yaw = ranked[0]
+        return pos_w, yaw, None, "MoMaGen-style target selected by geometric ranking."
+
+    wrist_pos_w = np.asarray(req.wrist_pos_w, dtype=np.float64)
+    wrist_quat_w = np.asarray(req.wrist_quat_wxyz_ik, dtype=np.float64)
+    best_failed: tuple[IKResult, np.ndarray, float] | None = None
+    for pos_w, yaw in ranked[: min(8, len(ranked))]:
+        wrist_pos_b, wrist_quat_b = _wrist_goal_in_base_frame(
+            wrist_pos_w=wrist_pos_w,
+            wrist_quat_wxyz=wrist_quat_w,
+            base_pos_w=pos_w,
+            base_yaw_rad=yaw,
+        )
+        ik = _ik_check_reachability(
+            wrist_pos=(float(wrist_pos_b[0]), float(wrist_pos_b[1]), float(wrist_pos_b[2])),
+            wrist_quat_wxyz=(float(wrist_quat_b[0]), float(wrist_quat_b[1]), float(wrist_quat_b[2]), float(wrist_quat_b[3])),
+            scene="",
+        )
+        if ik.reachable:
+            return pos_w, yaw, ik, "MoMaGen-style target selected with IK-feasible candidate."
+        if best_failed is None or ik.position_error < best_failed[0].position_error:
+            best_failed = (ik, pos_w, yaw)
+
+    if best_failed is not None:
+        return best_failed[1], best_failed[2], best_failed[0], "MoMaGen-style candidates not IK-reachable; using lowest IK-error candidate."
+    pos_w, yaw = ranked[0]
+    return pos_w, yaw, None, "MoMaGen-style target selected by ranking without IK candidate."
 
 
 def _waypoints_to_subgoals(
@@ -495,13 +728,13 @@ def plan_walk_to_grasp(req: PlannerRequest) -> PlannerResult:
     if req.planner not in {"auto", "curobo", "open_loop"}:
         raise ValueError(f"Unknown planner: {req.planner}")
 
-    target_pos_w, target_yaw = _resolve_target_pose(req)
-    target_xy = (float(target_pos_w[0]), float(target_pos_w[1]))
+    start_base_pos_w = np.asarray(req.start_base_pos_w, dtype=np.float64)
+    start_base_yaw = float(req.start_base_yaw_rad)
 
     curobo_available = False
     curobo_reason = "not requested"
     planner_used = "open_loop"
-    notes = ""
+    notes_parts: list[str] = []
 
     if req.planner in {"auto", "curobo"}:
         curobo_available, curobo_reason = _probe_curobo()
@@ -511,41 +744,90 @@ def plan_walk_to_grasp(req: PlannerRequest) -> PlannerResult:
                 f"Probe result: {curobo_reason}"
             )
         if curobo_available:
-            notes = "CuRobo available. IK reachability check enabled."
+            notes_parts.append("CuRobo available. IK reachability check enabled.")
         else:
-            notes = f"CuRobo unavailable, fallback to open-loop path: {curobo_reason}"
+            notes_parts.append(f"CuRobo unavailable, fallback to open-loop path: {curobo_reason}")
+
+    if req.sample_start_base_pose:
+        start_base_pos_w, start_base_yaw, start_note = _resolve_start_pose_momagen(req)
+        notes_parts.append(start_note)
+
+    sampled_candidate_ik: IKResult | None = None
+    if req.target_base_pos_w is not None:
+        target_pos_w, target_yaw = _resolve_target_pose(
+            req=req,
+            start_base_pos_w=start_base_pos_w,
+            start_base_yaw_rad=start_base_yaw,
+        )
+    elif req.sample_target_base_pose:
+        target_pos_w, target_yaw, sampled_candidate_ik, target_note = _resolve_target_pose_momagen(
+            req=req,
+            start_base_pos_w=start_base_pos_w,
+            start_base_yaw=start_base_yaw,
+            curobo_available=curobo_available,
+        )
+        notes_parts.append(target_note)
+    else:
+        target_pos_w, target_yaw = _resolve_target_pose(
+            req=req,
+            start_base_pos_w=start_base_pos_w,
+            start_base_yaw_rad=start_base_yaw,
+        )
+
+    target_xy = (float(target_pos_w[0]), float(target_pos_w[1]))
 
     # IK reachability check when CuRobo is available and wrist pose is provided
     ik_result = None
-    if curobo_available and hasattr(req, "wrist_pos_w") and req.wrist_pos_w is not None:
-        ik_result = _ik_check_reachability(
-            req.wrist_pos_w, req.wrist_quat_wxyz_ik, scene=req.scene,
+    wrist_goal_base: tuple[np.ndarray, np.ndarray] | None = None
+    if req.wrist_pos_w is not None and req.wrist_quat_wxyz_ik is not None:
+        wrist_goal_base = _wrist_goal_in_base_frame(
+            wrist_pos_w=np.asarray(req.wrist_pos_w, dtype=np.float64),
+            wrist_quat_wxyz=np.asarray(req.wrist_quat_wxyz_ik, dtype=np.float64),
+            base_pos_w=target_pos_w,
+            base_yaw_rad=target_yaw,
         )
-        if ik_result.reachable:
-            notes += " IK check: REACHABLE."
+
+    if curobo_available and wrist_goal_base is not None:
+        if sampled_candidate_ik is not None:
+            ik_result = sampled_candidate_ik
         else:
-            notes += f" IK check: UNREACHABLE ({ik_result.reason})."
+            pos_b, quat_b = wrist_goal_base
+            ik_result = _ik_check_reachability(
+                wrist_pos=(float(pos_b[0]), float(pos_b[1]), float(pos_b[2])),
+                wrist_quat_wxyz=(float(quat_b[0]), float(quat_b[1]), float(quat_b[2]), float(quat_b[3])),
+                scene="",
+            )
+        if ik_result.reachable:
+            notes_parts.append("IK check (target-base frame): REACHABLE.")
+        else:
+            notes_parts.append(f"IK check (target-base frame): UNREACHABLE ({ik_result.reason}).")
 
     # MotionGen trajectory planning when IK is reachable
     mg_result = None
-    if curobo_available and ik_result is not None and ik_result.reachable and req.wrist_pos_w is not None:
+    if curobo_available and ik_result is not None and ik_result.reachable and wrist_goal_base is not None:
+        pos_b, quat_b = wrist_goal_base
         mg_result = plan_arm_trajectory(
-            req.wrist_pos_w, req.wrist_quat_wxyz_ik, scene=req.scene,
+            wrist_pos=(float(pos_b[0]), float(pos_b[1]), float(pos_b[2])),
+            wrist_quat_wxyz=(float(quat_b[0]), float(quat_b[1]), float(quat_b[2]), float(quat_b[3])),
+            scene="",
         )
         if mg_result.success:
             planner_used = "curobo"
-            notes += f" MotionGen: OK ({mg_result.num_steps} steps, {mg_result.motion_time:.3f}s)."
+            notes_parts.append(f"MotionGen: OK ({mg_result.num_steps} steps, {mg_result.motion_time:.3f}s).")
         else:
-            notes += f" MotionGen: FAILED ({mg_result.reason}), fallback to open-loop."
+            notes_parts.append(f"MotionGen: FAILED ({mg_result.reason}), fallback to open-loop.")
 
-    waypoints_xy = _plan_open_loop_path(req, target_xy)
+    waypoints_xy = _plan_open_loop_path(req=req, start_base_pos_w=start_base_pos_w, target_xy=target_xy)
     subgoals = _waypoints_to_subgoals(waypoints_xy, target_yaw)
+    notes = " ".join([n for n in notes_parts if n]).strip()
 
     return PlannerResult(
         planner_requested=req.planner,
         planner_used=planner_used,
         curobo_available=curobo_available,
         curobo_reason=curobo_reason,
+        start_base_pos_w=(float(start_base_pos_w[0]), float(start_base_pos_w[1]), float(start_base_pos_w[2])),
+        start_base_yaw_rad=float(start_base_yaw),
         target_base_pos_w=(float(target_pos_w[0]), float(target_pos_w[1]), float(target_pos_w[2])),
         target_base_yaw_rad=float(target_yaw),
         path_waypoints_xy=[(float(x), float(y)) for x, y in waypoints_xy],
@@ -578,4 +860,15 @@ def request_from_args(args: Any) -> PlannerRequest:
         target_offset_frame=str(args.walk_target_offset_frame),
         target_yaw_mode=str(args.walk_target_yaw_mode),
         target_yaw_deg=float(args.walk_target_yaw_deg),
+        sample_start_base_pose=bool(getattr(args, "momagen_style", False)),
+        start_sample_dist_min=float(getattr(args, "momagen_start_dist_min", 0.4)),
+        start_sample_dist_max=float(getattr(args, "momagen_start_dist_max", 1.0)),
+        start_sample_attempts=int(getattr(args, "momagen_sample_attempts", 32)),
+        start_sample_seed=int(getattr(args, "momagen_sample_seed", 0)),
+        sample_target_base_pose=bool(getattr(args, "momagen_style", False)),
+        target_sample_dist_min=float(getattr(args, "momagen_target_dist_min", 0.4)),
+        target_sample_dist_max=float(getattr(args, "momagen_target_dist_max", 1.0)),
+        target_sample_attempts=int(getattr(args, "momagen_sample_attempts", 64)),
+        target_sample_seed=int(getattr(args, "momagen_sample_seed", 1)) + 17,
+        target_min_travel_dist=float(getattr(args, "momagen_min_travel_dist", 0.25)),
     )

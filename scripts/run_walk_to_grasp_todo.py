@@ -78,6 +78,22 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--scene", default="kitchen_pick_and_place")
     parser.add_argument("--object", default="cracker_box")
     parser.add_argument("--pattern", default="lift_place", choices=["line", "circle", "lift_place"])
+    parser.add_argument(
+        "--traj-start-pos-w",
+        default=None,
+        help="Optional object trajectory start xyz in world frame (overrides scene preset).",
+    )
+    parser.add_argument(
+        "--traj-end-pos-w",
+        default=None,
+        help="Optional object trajectory end xyz in world frame (overrides scene preset).",
+    )
+    parser.add_argument(
+        "--traj-lift-height",
+        type=float,
+        default=None,
+        help="Optional lift height used by lift_place pattern.",
+    )
 
     parser.add_argument("--planner", choices=["auto", "curobo", "open_loop"], default="auto")
     parser.add_argument("--strict-curobo", action="store_true")
@@ -93,6 +109,24 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--walk-nav-max-ang-speed", type=float, default=0.55)
     parser.add_argument("--walk-nav-dt", type=float, default=0.02)
     parser.add_argument("--walk-pregrasp-hold-steps", type=int, default=25)
+    parser.add_argument(
+        "--momagen-style",
+        action="store_true",
+        help="Use MoMaGen-style sampled start/target base pose with reachability-biased ranking.",
+    )
+    parser.add_argument("--momagen-start-dist-min", type=float, default=0.4)
+    parser.add_argument("--momagen-start-dist-max", type=float, default=1.0)
+    parser.add_argument("--momagen-target-dist-min", type=float, default=0.4)
+    parser.add_argument("--momagen-target-dist-max", type=float, default=1.0)
+    parser.add_argument("--momagen-min-travel-dist", type=float, default=0.25)
+    parser.add_argument("--momagen-sample-attempts", type=int, default=40)
+    parser.add_argument("--momagen-sample-seed", type=int, default=13)
+    parser.add_argument(
+        "--replay-base-height",
+        type=float,
+        default=None,
+        help="Optional base height action command forwarded to build_arm_follow_replay.py.",
+    )
 
     parser.add_argument("--right-wrist-pos-obj", default="-0.20,-0.03,0.10")
     parser.add_argument("--right-wrist-quat-obj-wxyz", default="0.70710678,0.0,-0.70710678,0.0")
@@ -193,6 +227,12 @@ def main() -> None:
             "--scene-preset",
             scene_preset,
         ]
+        if args.traj_start_pos_w:
+            cmd.extend(["--start-pos-w", args.traj_start_pos_w])
+        if args.traj_end_pos_w:
+            cmd.extend(["--end-pos-w", args.traj_end_pos_w])
+        if args.traj_lift_height is not None:
+            cmd.extend(["--lift-height", f"{args.traj_lift_height}"])
         code, out = _run_cmd(cmd)
         if code != 0:
             raise RuntimeError(out)
@@ -245,6 +285,17 @@ def main() -> None:
             target_yaw_deg=float(args.walk_target_yaw_deg),
             wrist_pos_w=tuple(_float_list(wrist_pos_w)),  # type: ignore[arg-type]
             wrist_quat_wxyz_ik=tuple(_float_list(wrist_quat_w)),  # type: ignore[arg-type]
+            sample_start_base_pose=bool(args.momagen_style),
+            start_sample_dist_min=float(args.momagen_start_dist_min),
+            start_sample_dist_max=float(args.momagen_start_dist_max),
+            start_sample_attempts=int(args.momagen_sample_attempts),
+            start_sample_seed=int(args.momagen_sample_seed),
+            sample_target_base_pose=bool(args.momagen_style),
+            target_sample_dist_min=float(args.momagen_target_dist_min),
+            target_sample_dist_max=float(args.momagen_target_dist_max),
+            target_sample_attempts=int(args.momagen_sample_attempts),
+            target_sample_seed=int(args.momagen_sample_seed) + 17,
+            target_min_travel_dist=float(args.momagen_min_travel_dist),
         )
         result = plan_walk_to_grasp(req)
         detail = {"planner_result": result.to_dict()}
@@ -267,6 +318,15 @@ def main() -> None:
 
     planner_detail = run_step(3, "plan_walk_to_grasp", _step3_plan_walk)
     planner_result = planner_detail["planner_result"]
+    start_base_pos_w = planner_result.get(
+        "start_base_pos_w",
+        _float_list(_parse_csv_floats(base_pos_w, 3, "base_pos_w")),
+    )
+    start_base_pos_w_csv = f"{start_base_pos_w[0]},{start_base_pos_w[1]},{start_base_pos_w[2]}"
+    start_base_yaw_rad = float(
+        planner_result.get("start_base_yaw_rad", math.radians(float(args.base_yaw_deg)))
+    )
+    start_base_yaw_deg = float(math.degrees(start_base_yaw_rad))
     target_base_pos_w = planner_result["target_base_pos_w"]
     target_base_yaw_rad = float(planner_result["target_base_yaw_rad"])
     target_base_yaw_deg = float(math.degrees(target_base_yaw_rad))
@@ -301,9 +361,9 @@ def main() -> None:
             replay_hdf5,
             "--output-debug-json",
             debug_replay_json,
-            f"--base-pos-w={base_pos_w}",
+            f"--base-pos-w={start_base_pos_w_csv}",
             "--base-yaw",
-            str(math.radians(float(args.base_yaw_deg))),
+            str(start_base_yaw_rad),
             f"--right-wrist-pos-obj={args.right_wrist_pos_obj}",
             f"--right-wrist-quat-obj-wxyz={args.right_wrist_quat_obj_wxyz}",
             "--right-wrist-quat-control",
@@ -328,6 +388,8 @@ def main() -> None:
             "--walk-pregrasp-hold-steps",
             f"{args.walk_pregrasp_hold_steps}",
         ]
+        if args.replay_base_height is not None:
+            cmd.extend(["--base-height", f"{args.replay_base_height}"])
         if len(subgoals_for_replay) > 1:
             cmd.extend(["--walk-nav-subgoals-json", json.dumps(subgoals_for_replay)])
         if pregrasp_traj_npz is not None:
@@ -401,7 +463,7 @@ def main() -> None:
                 "g1_wbc_pink",
             ]
             if args.scene == "kitchen_pick_and_place":
-                cmd.extend([f"--g1-init-pos-w={base_pos_w}", "--g1-init-yaw-deg", str(args.base_yaw_deg)])
+                cmd.extend([f"--g1-init-pos-w={start_base_pos_w_csv}", "--g1-init-yaw-deg", str(start_base_yaw_deg)])
             if args.headless:
                 cmd.insert(2, "--headless")
             code, out = _run_cmd(cmd, cwd=isaac_root, env=os.environ.copy())

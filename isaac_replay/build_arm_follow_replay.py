@@ -19,7 +19,7 @@ import h5py
 import numpy as np
 
 
-# 23D action layout
+# 23D base action layout (+ optional 12 right finger angles = 35D)
 LEFT_HAND_STATE_IDX = 0
 RIGHT_HAND_STATE_IDX = 1
 LEFT_WRIST_POS_START_IDX = 2
@@ -35,7 +35,10 @@ NAV_CMD_END_IDX = 19
 BASE_HEIGHT_IDX = 19
 TORSO_RPY_START_IDX = 20
 TORSO_RPY_END_IDX = 23
-ACTION_DIM = 23
+BASE_ACTION_DIM = 23
+RIGHT_FINGER_START_IDX = 23
+RIGHT_FINGER_END_IDX = 35
+ACTION_DIM_WITH_FINGERS = 35
 
 
 def _parse_csv_floats(text: str, expected_len: int, name: str) -> np.ndarray:
@@ -225,6 +228,50 @@ def _load_cedex_wrist_pose_from_pt(
         if "robot_name" in entry:
             meta["robot_name"] = str(entry["robot_name"])
     return wrist_pos_obj, wrist_quat_obj, meta
+
+
+def _load_bodex_grasp_from_pt(
+    grasp_pt_path: str,
+    grasp_index: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
+    """Load BODex format .pt: wrist_pose_7d [K,7] + joint_angles_12 [K,12].
+
+    Returns (wrist_pos_obj [3], wrist_quat_obj_wxyz [4], finger_q_12 [12], meta).
+    """
+    try:
+        import torch
+    except Exception as exc:
+        raise RuntimeError("BODex grasp import requires torch.") from exc
+
+    payload = torch.load(grasp_pt_path, map_location="cpu")
+    if not isinstance(payload, dict) or "wrist_pose_7d" not in payload:
+        raise ValueError(
+            f"Not a BODex grasp file (missing 'wrist_pose_7d'): {grasp_pt_path}"
+        )
+
+    wrist_7d = np.asarray(payload["wrist_pose_7d"], dtype=np.float64)  # [K, 7]
+    finger_12 = np.asarray(payload["joint_angles_12"], dtype=np.float64)  # [K, 12]
+    K = wrist_7d.shape[0]
+
+    idx = int(grasp_index)
+    if idx < 0:
+        idx += K
+    if idx < 0 or idx >= K:
+        raise IndexError(f"grasp_index={grasp_index} out of range for {K} grasps.")
+
+    # wrist_pose_7d format: [x, y, z, w, qx, qy, qz]
+    pos = wrist_7d[idx, :3]
+    quat_wxyz = _normalize_quat_wxyz(wrist_7d[idx, 3:7])
+
+    meta: dict[str, Any] = {
+        "grasp_pt_path": os.path.abspath(grasp_pt_path),
+        "format": "bodex",
+        "num_grasps": K,
+        "selected_index": idx,
+        "grasp_error": float(payload["grasp_error"][idx]) if "grasp_error" in payload else -1.0,
+        "object_name": str(payload.get("object_name", "")),
+    }
+    return pos, quat_wxyz, np.asarray(finger_12[idx]), meta
 
 
 def _build_walk_to_grasp_nav_cmds(
@@ -457,6 +504,13 @@ def _make_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
+        "--bodex-grasp-pt",
+        default=None,
+        help="Optional BODex .pt file (wrist_pose_7d + joint_angles_12). Overrides wrist pose and provides finger angles.",
+    )
+    parser.add_argument("--bodex-grasp-index", type=int, default=0, help="Grasp index in BODex file.")
+
+    parser.add_argument(
         "--cedex-grasp-pt",
         default=None,
         help="Optional CEDex generated_grasps .pt file. If set, override right wrist object-frame pose.",
@@ -520,6 +574,20 @@ def main() -> None:
             "right_wrist_quat_obj_wxyz": right_wrist_quat_obj.tolist(),
             "wrist_pos_offset": cedex_wrist_pos_offset.tolist(),
             "wrist_quat_offset_wxyz": cedex_wrist_quat_offset.tolist(),
+        }
+
+    bodex_debug: dict[str, Any] | None = None
+    bodex_finger_q_12: np.ndarray | None = None
+    if args.bodex_grasp_pt:
+        right_wrist_pos_obj, right_wrist_quat_obj, bodex_finger_q_12, bodex_meta = _load_bodex_grasp_from_pt(
+            grasp_pt_path=args.bodex_grasp_pt,
+            grasp_index=args.bodex_grasp_index,
+        )
+        bodex_debug = {
+            **bodex_meta,
+            "right_wrist_pos_obj": right_wrist_pos_obj.tolist(),
+            "right_wrist_quat_obj_wxyz": right_wrist_quat_obj.tolist(),
+            "finger_q_12": bodex_finger_q_12.tolist(),
         }
 
     nav_cmds = np.zeros((0, 3), dtype=np.float32)
@@ -610,7 +678,8 @@ def main() -> None:
     prefix_steps = nav_steps + pregrasp_hold_steps + pregrasp_traj_steps
     total_steps = prefix_steps + n_obj
 
-    actions = np.zeros((total_steps, ACTION_DIM), dtype=np.float32)
+    action_dim = ACTION_DIM_WITH_FINGERS if bodex_finger_q_12 is not None else BASE_ACTION_DIM
+    actions = np.zeros((total_steps, action_dim), dtype=np.float32)
     actions[:, LEFT_HAND_STATE_IDX] = np.float32(args.left_hand_state)
     actions[:, RIGHT_HAND_STATE_IDX] = np.float32(args.right_hand_state)
     actions[:, LEFT_WRIST_POS_START_IDX:LEFT_WRIST_POS_END_IDX] = left_wrist_pos.astype(np.float32)
@@ -636,6 +705,13 @@ def main() -> None:
     actions[arm_start:, RIGHT_WRIST_POS_START_IDX:RIGHT_WRIST_POS_END_IDX] = right_wrist_pos_pelvis.astype(np.float32)
     actions[arm_start:, RIGHT_WRIST_QUAT_START_IDX:RIGHT_WRIST_QUAT_END_IDX] = right_wrist_quat_pelvis.astype(np.float32)
     actions[arm_start:, NAV_CMD_START_IDX:NAV_CMD_END_IDX] = 0.0
+
+    # Fill BODex InspireHand finger angles into extended action dimensions
+    if bodex_finger_q_12 is not None:
+        # During grasp phase (arm_start onward): use BODex finger angles
+        actions[arm_start:, RIGHT_FINGER_START_IDX:RIGHT_FINGER_END_IDX] = bodex_finger_q_12.astype(np.float32)
+        # Set right hand state to 1 (closed) during grasp phase
+        actions[arm_start:, RIGHT_HAND_STATE_IDX] = 1.0
 
     with h5py.File(args.output_hdf5, "w") as f:
         grp = f.create_group("data")
@@ -681,6 +757,8 @@ def main() -> None:
         debug["walk_to_grasp"] = walk_debug
     if cedex_debug is not None:
         debug["cedex"] = cedex_debug
+    if bodex_debug is not None:
+        debug["bodex"] = bodex_debug
 
     if args.output_debug_json:
         with open(args.output_debug_json, "w", encoding="utf-8") as f:
