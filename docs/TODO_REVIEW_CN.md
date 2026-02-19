@@ -56,6 +56,56 @@ Todo规划了CuRobo混合架构（8步），但实际代码走了**开环速度�
 - 无独立policy类：通过hdf5 replay实现
 - 优点：简单可靠，无额外GPU依赖，已能跑通
 
+### 2.4 13管道分析 (`scripts/13_run_todo_walk_to_grasp.sh`)
+
+在08管道之上，还存在一套独立的13管道，由3个文件组成：
+
+| 文件 | 角色 | 状态 |
+|------|------|------|
+| `scripts/13_run_todo_walk_to_grasp.sh` | Shell入口，参数暴露+GPU自动选择 | ✅ 完整 |
+| `scripts/run_walk_to_grasp_todo.py` | Python 8步编排器+报告生成 | ⚠️ 有bug |
+| `isaac_replay/g1_curobo_planner.py` | CuRobo探测+开环fallback规划 | ⚠️ 有bug |
+
+**13管道8步状态**:
+
+| Step | 名称 | 状态 | 说明 |
+|------|------|------|------|
+| 1 | generate_object_traj | ✅ | 调用generate_debug_object_traj.py |
+| 2 | load_planner_inputs | ✅ | 从npz读取物体初始pose |
+| 3 | plan_walk_to_grasp | ⚠️ | CuRobo永远fallback到开环 |
+| 4 | build_replay_actions | ✅ | 调用build_arm_follow_replay.py |
+| 5 | read_replay_metadata | ✅ | 读取debug json |
+| 6 | run_isaac_policy_runner | ✅ | 调用policy_runner |
+| 7 | validate_artifacts | ✅ | 检查输出文件 |
+| 8 | write_report | ✅ | 生成todo_run_report.json |
+
+**发现并修复的Bug**:
+
+1. **`strict_curobo`逻辑错误** (`g1_curobo_planner.py:232`):
+   - 原代码：`strict_curobo=True`时无论CuRobo是否可用都raise
+   - 修复：加了`not curobo_available`条件
+
+2. **planner避障路径被丢弃** (`run_walk_to_grasp_todo.py` Step4):
+   - 原代码：planner计算了多段避障waypoints，但只传最终target_base_pos_w给build_replay
+   - build_replay内部重新算直线路径，避障白算了
+   - 修复：新增`--walk-nav-subgoals-json`参数，多段路径时传给build_replay
+
+3. **CuRobo是空壳**:
+   - `_probe_curobo()`能检测CuRobo是否可导入
+   - 但即使可导入，也因缺少G1 robot config而永远走开环
+   - `planner_used`永远是`"open_loop"`
+   - 这不是bug，是已知限制，注释中有说明
+
+**13管道 vs 08管道对比**:
+
+| 对比项 | 08管道 | 13管道 |
+|--------|--------|--------|
+| 路径规划 | 无（直线） | 2D AABB避障 |
+| CuRobo | 无 | 框架搭好，实际未用 |
+| 编排 | Shell串联 | Python 8步+报告 |
+| GUI | fzf参数选择 | 无 |
+| 成熟度 | 已验证 | 框架完整，需验证 |
+
 ---
 
 ## 三、功能2: InspireHand + CEDex 逐项审查
@@ -139,7 +189,7 @@ Todo (`03_implementation_steps.md`) 规划的CuRobo 8步方案，实际代码一
 |--------|------|------|
 | P1 | 更新todo文档 | 让todo反映实际实现方案而非CuRobo空想 |
 | P1 | InspireHand手指关节映射 | 当前hand_state只有开/合(1D)，InspireHand有24个关节 |
-| P2 | 碰撞检测 | 当前直线导航无避障，复杂场景会撞障碍物 |
+| P2 | 碰撞检测 | 13管道已有2D AABB避障，但CuRobo 3D避障仍缺 |
 | P2 | IK可达性验证 | 当前不检查停靠位置手臂能否够到物体 |
 
 ### 5.3 CuRobo方案是否还需要
