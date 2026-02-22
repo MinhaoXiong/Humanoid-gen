@@ -692,6 +692,20 @@ def main():
 
         arena_builder = get_arena_builder_from_cli(args_cli)
         env = arena_builder.make_registered()
+        try:
+            robot_asset = env.scene["robot"]
+            fixed_flags: list[bool] = []
+            for attr in ("is_fixed_base", "fixed_base"):
+                if hasattr(robot_asset, attr):
+                    fixed_flags.append(bool(getattr(robot_asset, attr)))
+            if any(fixed_flags):
+                print(
+                    "[WARN][runner] Robot articulation is fixed-base. "
+                    "Locomotion commands (vx/vy/wz) will not move the base and can cause unstable leg motion. "
+                    "For mobile walk-to-grasp, set G1_INSPIRE_HAND_USD_PATH to a mobile-base USD."
+                )
+        except Exception:
+            pass
 
         if args_cli.seed is not None:
             env.seed(args_cli.seed)
