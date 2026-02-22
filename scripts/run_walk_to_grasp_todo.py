@@ -78,6 +78,14 @@ def _float_list(v: np.ndarray) -> list[float]:
     return [float(x) for x in v.reshape(-1).tolist()]
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, str(default))
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return int(default)
+
+
 def _make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -168,6 +176,23 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--no-runner", action="store_true", help="Only build replay artifacts, skip Isaac runner.")
+    parser.add_argument(
+        "--runner-debug-dir",
+        default=os.environ.get("RUNNER_DEBUG_DIR", None),
+        help="Optional directory for runner step debug dump (JSONL + metadata).",
+    )
+    parser.add_argument(
+        "--runner-debug-every",
+        type=int,
+        default=_env_int("RUNNER_DEBUG_EVERY", 1),
+        help="Runner debug sampling period in simulation steps.",
+    )
+    parser.add_argument(
+        "--runner-debug-max-steps",
+        type=int,
+        default=_env_int("RUNNER_DEBUG_MAX_STEPS", 2000),
+        help="Maximum number of debug samples to dump from runner.",
+    )
     parser.add_argument("--isaac-python", default=os.environ.get("ISAAC_PYTHON", None))
     return parser
 
@@ -333,6 +358,7 @@ def main() -> None:
             target_yaw_deg=float(args.walk_target_yaw_deg),
             wrist_pos_w=tuple(_float_list(wrist_pos_w)),  # type: ignore[arg-type]
             wrist_quat_wxyz_ik=tuple(_float_list(wrist_quat_w)),  # type: ignore[arg-type]
+            base_height=float(args.replay_base_height),
             sample_start_base_pose=bool(args.momagen_style),
             start_sample_dist_min=float(args.momagen_start_dist_min),
             start_sample_dist_max=float(args.momagen_start_dist_max),
@@ -519,12 +545,28 @@ def main() -> None:
             ]
             if args.scene == "kitchen_pick_and_place":
                 cmd.extend([f"--g1-init-pos-w={start_base_pos_w_csv}", "--g1-init-yaw-deg", str(start_base_yaw_deg)])
+            if args.runner_debug_dir:
+                runner_debug_dir = os.path.abspath(args.runner_debug_dir)
+                os.makedirs(runner_debug_dir, exist_ok=True)
+                cmd.extend(
+                    [
+                        "--debug-dump-dir",
+                        runner_debug_dir,
+                        "--debug-dump-every",
+                        str(max(1, int(args.runner_debug_every))),
+                        "--debug-dump-max-steps",
+                        str(max(1, int(args.runner_debug_max_steps))),
+                    ]
+                )
             if args.headless:
                 cmd.insert(2, "--headless")
             code, out = _run_cmd(cmd, cwd=isaac_root, env=child_env)
             if code != 0:
                 raise RuntimeError(out[-4000:])
-            return {"command": cmd, "stdout_tail": out[-1500:], "max_steps": max_steps}
+            detail = {"command": cmd, "stdout_tail": out[-1500:], "max_steps": max_steps}
+            if args.runner_debug_dir:
+                detail["runner_debug_dir"] = os.path.abspath(args.runner_debug_dir)
+            return detail
 
         run_step(6, "run_isaac_policy_runner", _step6_run_runner)
     else:

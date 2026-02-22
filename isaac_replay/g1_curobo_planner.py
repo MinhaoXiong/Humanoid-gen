@@ -149,9 +149,16 @@ def _wrist_goal_in_base_frame(
     wrist_quat_wxyz: np.ndarray,
     base_pos_w: np.ndarray,
     base_yaw_rad: float,
+    base_height: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray]:
+    # base_pos_w is typically at ground level (Z=0).  CuRobo's base_link is
+    # torso_link (pelvis), which sits at base_height above the ground.
+    # We must lift base_pos_w.z so the IK target is expressed relative to the
+    # actual pelvis position, not the ground.
+    base_pos = np.array(base_pos_w, dtype=np.float64)
+    base_pos[2] = base_pos[2] + float(base_height)
     r_bw = _rotz(base_yaw_rad)
-    p_b = r_bw.T @ (wrist_pos_w - base_pos_w)
+    p_b = r_bw.T @ (wrist_pos_w - base_pos)
     q_bw = np.array([math.cos(0.5 * base_yaw_rad), 0.0, 0.0, math.sin(0.5 * base_yaw_rad)], dtype=np.float64)
     q_wb = _quat_conj_wxyz(q_bw)
     q_b = _quat_mul_wxyz(q_wb, wrist_quat_wxyz)
@@ -350,6 +357,7 @@ class PlannerRequest:
     target_yaw_deg: float
     wrist_pos_w: tuple[float, float, float] | None = None
     wrist_quat_wxyz_ik: tuple[float, float, float, float] | None = None
+    base_height: float = 0.0  # pelvis (torso_link) height above ground for IK
     sample_start_base_pose: bool = False
     start_sample_dist_min: float = 0.4
     start_sample_dist_max: float = 1.0
@@ -496,7 +504,7 @@ def _ik_check_reachability(
                 robot_cfg,
                 world_model=world_cfg,
                 num_seeds=32,
-                position_threshold=0.01,
+                position_threshold=0.02,
                 rotation_threshold=0.05,
             )
         except Exception:
@@ -505,7 +513,7 @@ def _ik_check_reachability(
                 robot_cfg,
                 world_model=None,
                 num_seeds=32,
-                position_threshold=0.01,
+                position_threshold=0.02,
                 rotation_threshold=0.05,
                 collision_checker_type=None,
                 self_collision_check=False,
@@ -837,6 +845,7 @@ def _resolve_target_pose_momagen(
             wrist_quat_wxyz=wrist_quat_w,
             base_pos_w=pos_w,
             base_yaw_rad=yaw,
+            base_height=req.base_height,
         )
         ik = _ik_check_reachability(
             wrist_pos=(float(wrist_pos_b[0]), float(wrist_pos_b[1]), float(wrist_pos_b[2])),
@@ -947,6 +956,7 @@ def plan_walk_to_grasp(req: PlannerRequest) -> PlannerResult:
             wrist_quat_wxyz=np.asarray(req.wrist_quat_wxyz_ik, dtype=np.float64),
             base_pos_w=target_pos_w,
             base_yaw_rad=target_yaw,
+            base_height=req.base_height,
         )
 
     if curobo_available and wrist_goal_base is not None:

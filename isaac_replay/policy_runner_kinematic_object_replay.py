@@ -132,6 +132,24 @@ def _add_object_replay_args(parser):
         default="/tmp/hoi_runtime_usd",
         help="Directory used to cache converted runtime USD meshes.",
     )
+    parser.add_argument(
+        "--debug-dump-dir",
+        type=str,
+        default=None,
+        help="Optional directory to dump step-by-step debug traces (JSONL + metadata).",
+    )
+    parser.add_argument(
+        "--debug-dump-every",
+        type=int,
+        default=1,
+        help="Record one debug sample every N simulation steps.",
+    )
+    parser.add_argument(
+        "--debug-dump-max-steps",
+        type=int,
+        default=2000,
+        help="Maximum number of debug samples to write.",
+    )
 
 
 def _add_video_args(parser):
@@ -479,6 +497,156 @@ def _disable_non_timeout_terminations(env) -> list[str]:
     return disabled_terms
 
 
+def _to_serializable(value):
+    if torch.is_tensor(value):
+        return value.detach().cpu().tolist()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, dict):
+        return {str(k): _to_serializable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_serializable(v) for v in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+class _RuntimeDebugLogger:
+    def __init__(self, args_cli, env):
+        self.enabled = bool(args_cli.debug_dump_dir)
+        self.sample_every = max(1, int(getattr(args_cli, "debug_dump_every", 1)))
+        self.max_samples = max(1, int(getattr(args_cli, "debug_dump_max_steps", 2000)))
+        self.num_samples = 0
+        self._fp = None
+        self._step_path = None
+        self._meta_path = None
+
+        if not self.enabled:
+            return
+
+        dump_dir = os.path.abspath(args_cli.debug_dump_dir)
+        os.makedirs(dump_dir, exist_ok=True)
+        self._step_path = os.path.join(dump_dir, "runner_debug_steps.jsonl")
+        self._meta_path = os.path.join(dump_dir, "runner_debug_meta.json")
+        self._fp = open(self._step_path, "w", encoding="utf-8")
+
+        meta: dict[str, object] = {
+            "args": _to_serializable(vars(args_cli)),
+            "paths": {},
+            "env": {},
+            "action_term": {},
+        }
+        try:
+            import isaaclab_arena
+
+            meta["paths"]["isaaclab_arena"] = os.path.abspath(isaaclab_arena.__file__)
+        except Exception as exc:  # pragma: no cover - best-effort debug
+            meta["paths"]["isaaclab_arena_error"] = f"{type(exc).__name__}: {exc}"
+        try:
+            import isaaclab
+
+            meta["paths"]["isaaclab"] = os.path.abspath(isaaclab.__file__)
+        except Exception as exc:  # pragma: no cover - best-effort debug
+            meta["paths"]["isaaclab_error"] = f"{type(exc).__name__}: {exc}"
+
+        try:
+            meta["env"]["action_terms"] = list(getattr(env.action_manager, "active_terms", []))
+            meta["env"]["action_term_dims"] = list(getattr(env.action_manager, "action_term_dim", []))
+        except Exception as exc:  # pragma: no cover - best-effort debug
+            meta["env"]["action_manager_error"] = f"{type(exc).__name__}: {exc}"
+        try:
+            meta["env"]["robot_joint_names"] = list(env.scene["robot"].data.joint_names)
+        except Exception as exc:  # pragma: no cover - best-effort debug
+            meta["env"]["robot_joint_names_error"] = f"{type(exc).__name__}: {exc}"
+        try:
+            g1_term = env.action_manager.get_term("g1_action")
+            meta["action_term"]["type"] = type(g1_term).__name__
+            if hasattr(g1_term, "action_dim"):
+                meta["action_term"]["action_dim"] = int(g1_term.action_dim)
+            if hasattr(g1_term, "wbc_g1_joints_order"):
+                wbc_joint_order = list(g1_term.wbc_g1_joints_order.keys())
+                meta["action_term"]["wbc_joint_order"] = wbc_joint_order
+                meta["action_term"]["wbc_joint_order_len"] = len(wbc_joint_order)
+                try:
+                    from isaaclab_arena_g1.g1_whole_body_controller.wbc_policy.policy.policy_constants import G1_NUM_JOINTS
+
+                    meta["action_term"]["policy_constant_g1_num_joints"] = int(G1_NUM_JOINTS)
+                    if int(G1_NUM_JOINTS) != len(wbc_joint_order):
+                        meta["action_term"]["joint_count_warning"] = (
+                            f"G1_NUM_JOINTS={int(G1_NUM_JOINTS)} but wbc_joint_order_len={len(wbc_joint_order)}"
+                        )
+                except Exception as exc:  # pragma: no cover - best-effort debug
+                    meta["action_term"]["policy_constant_error"] = f"{type(exc).__name__}: {exc}"
+        except Exception as exc:  # pragma: no cover - best-effort debug
+            meta["action_term"]["error"] = f"{type(exc).__name__}: {exc}"
+
+        with open(self._meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2, ensure_ascii=False)
+        print(f"[debug_dump] metadata: {self._meta_path}")
+        print(f"[debug_dump] step trace: {self._step_path}")
+
+    def record(self, *, step: int, episode_step: int, env, actions, terminated, truncated, kin_asset_name: str):
+        if not self.enabled:
+            return
+        if self.num_samples >= self.max_samples:
+            return
+        if (step % self.sample_every) != 0:
+            return
+
+        entry: dict[str, object] = {
+            "step": int(step),
+            "episode_step": int(episode_step),
+            "terminated": _to_serializable(terminated),
+            "truncated": _to_serializable(truncated),
+        }
+        try:
+            entry["cmd_actions"] = _to_serializable(actions[0])
+        except Exception:
+            pass
+
+        try:
+            term = env.action_manager.get_term("g1_action")
+            if hasattr(term, "raw_actions"):
+                entry["term_raw_actions"] = _to_serializable(term.raw_actions[0])
+            if hasattr(term, "processed_actions"):
+                entry["term_processed_actions"] = _to_serializable(term.processed_actions[0])
+            if hasattr(term, "navigate_cmd"):
+                entry["term_navigate_cmd"] = _to_serializable(term.navigate_cmd[0])
+            if hasattr(term, "_wbc_goal"):
+                entry["term_wbc_goal"] = _to_serializable(term._wbc_goal)
+        except Exception as exc:  # pragma: no cover - best-effort debug
+            entry["term_error"] = f"{type(exc).__name__}: {exc}"
+
+        try:
+            robot = env.scene["robot"].data
+            entry["robot_root_pos_w"] = _to_serializable(robot.root_pos_w[0])
+            entry["robot_root_link_pos_w"] = _to_serializable(robot.root_link_pos_w[0])
+            entry["robot_root_link_lin_vel_b"] = _to_serializable(robot.root_link_lin_vel_b[0])
+            entry["robot_root_link_ang_vel_b"] = _to_serializable(robot.root_link_ang_vel_b[0])
+            entry["robot_joint_pos"] = _to_serializable(robot.joint_pos[0])
+            entry["robot_joint_vel"] = _to_serializable(robot.joint_vel[0])
+        except Exception as exc:  # pragma: no cover - best-effort debug
+            entry["robot_state_error"] = f"{type(exc).__name__}: {exc}"
+
+        try:
+            obj = env.scene[kin_asset_name].data
+            entry["object_root_pos_w"] = _to_serializable(obj.root_pos_w[0])
+        except Exception as exc:  # pragma: no cover - best-effort debug
+            entry["object_state_error"] = f"{type(exc).__name__}: {exc}"
+
+        assert self._fp is not None
+        self._fp.write(json.dumps(entry, ensure_ascii=True) + "\n")
+        self._fp.flush()
+        self.num_samples += 1
+
+    def close(self):
+        if self._fp is not None:
+            self._fp.close()
+            self._fp = None
+
+
 def main():
     args_parser = get_isaaclab_arena_cli_parser()
     args_cli, _ = args_parser.parse_known_args()
@@ -541,6 +709,7 @@ def main():
             hold_last_pose=not args_cli.kin_no_hold_last_pose,
             start_step=args_cli.kin_start_step,
         )
+        debug_logger = _RuntimeDebugLogger(args_cli, env)
 
         if object_only:
             step_budget = object_replayer.length
@@ -600,6 +769,16 @@ def main():
 
                 if args_cli.kin_apply_timing == "post_step":
                     object_replayer.apply(env, episode_step)
+
+                debug_logger.record(
+                    step=step,
+                    episode_step=episode_step,
+                    env=env,
+                    actions=actions,
+                    terminated=terminated,
+                    truncated=truncated,
+                    kin_asset_name=args_cli.kin_asset_name,
+                )
 
                 if args_cli.save_video:
                     if "camera_obs" in obs:
@@ -664,6 +843,7 @@ def main():
                     combined.append(np.concatenate([fp, tp], axis=1))
                 combined_path = os.path.join(args_cli.video_output_dir, f"{args_cli.video_prefix}_combined.mp4")
                 _save_frames_to_video(combined, combined_path, fps=args_cli.video_fps)
+        debug_logger.close()
         env.close()
 
 
