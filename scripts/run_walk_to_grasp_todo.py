@@ -537,14 +537,8 @@ def main() -> None:
                 str(max_steps),
                 "--abort-on-reset",
                 "--ignore-task-terminations",
-                args.scene,
-                "--object",
-                args.object,
-                "--embodiment",
-                "g1_wbc_pink",
             ]
-            if args.scene == "kitchen_pick_and_place":
-                cmd.extend([f"--g1-init-pos-w={start_base_pos_w_csv}", "--g1-init-yaw-deg", str(start_base_yaw_deg)])
+            # Main parser options must be placed before the scene sub-command.
             if args.runner_debug_dir:
                 runner_debug_dir = os.path.abspath(args.runner_debug_dir)
                 os.makedirs(runner_debug_dir, exist_ok=True)
@@ -558,6 +552,19 @@ def main() -> None:
                         str(max(1, int(args.runner_debug_max_steps))),
                     ]
                 )
+
+            # Scene sub-command and its arguments.
+            cmd.extend(
+                [
+                    args.scene,
+                    "--object",
+                    args.object,
+                    "--embodiment",
+                    "g1_wbc_pink",
+                ]
+            )
+            if args.scene == "kitchen_pick_and_place":
+                cmd.extend([f"--g1-init-pos-w={start_base_pos_w_csv}", "--g1-init-yaw-deg", str(start_base_yaw_deg)])
             if args.headless:
                 cmd.insert(2, "--headless")
             code, out = _run_cmd(cmd, cwd=isaac_root, env=child_env)
