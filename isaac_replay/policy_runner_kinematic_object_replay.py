@@ -8,8 +8,17 @@ import numpy as np
 import os
 import random
 import re
+import sys
 import torch
 import tqdm
+
+# Ensure we import the IsaacLab-Arena checkout that ships with Humanoid-gen-pack,
+# instead of an unrelated editable install elsewhere in the workspace.
+_SCRIPT_DIR = os.path.abspath(os.path.dirname(__file__))
+_PACK_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, ".."))
+_LOCAL_ARENA_ROOT = os.path.join(_PACK_ROOT, "repos", "IsaacLab-Arena")
+if os.path.isdir(os.path.join(_LOCAL_ARENA_ROOT, "isaaclab_arena")) and _LOCAL_ARENA_ROOT not in sys.path:
+    sys.path.insert(0, _LOCAL_ARENA_ROOT)
 
 from isaaclab_arena.cli.isaaclab_arena_cli import get_isaaclab_arena_cli_parser
 from isaaclab_arena.examples.example_environments.cli import (

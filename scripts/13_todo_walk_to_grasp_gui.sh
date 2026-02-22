@@ -69,10 +69,31 @@ else
   REPLAY_BASE_HEIGHT=${REPLAY_BASE_HEIGHT:-"0.78"}
 fi
 
-# CuRobo lives in BODex/src — add to PYTHONPATH so MotionGen works
-export PYTHONPATH="${PACK_ROOT}/../BODex/src:${PYTHONPATH:-}"
+# Force local IsaacLab-Arena checkout first, then CuRobo from BODex (if available).
+BODEX_SRC="${BODEX_SRC:-$PACK_ROOT/../BODex/src}"
+if [[ -d "$BODEX_SRC" ]]; then
+  export PYTHONPATH="${PACK_ROOT}/repos/IsaacLab-Arena:${BODEX_SRC}:${PYTHONPATH:-}"
+else
+  export PYTHONPATH="${PACK_ROOT}/repos/IsaacLab-Arena:${PYTHONPATH:-}"
+  echo "[13_todo] WARNING: BODex src not found at $BODEX_SRC (set BODEX_SRC if needed)"
+fi
 
-PYTHON="${ISAAC_PYTHON:-/home/ubuntu/miniconda3/envs/isaaclab_arena/bin/python}"
+if [[ -n "${ISAAC_PYTHON:-}" ]]; then
+  PYTHON="$ISAAC_PYTHON"
+elif [[ -x "/home/ubuntu/miniconda3/envs/isaaclab_arena/bin/python" ]]; then
+  PYTHON="/home/ubuntu/miniconda3/envs/isaaclab_arena/bin/python"
+else
+  PYTHON="$(command -v python3 || command -v python)"
+fi
+
+# Guardrail: make sure we are importing isaaclab_arena from this repo's submodule.
+ARENA_IMPORT_PATH="$("$PYTHON" -c 'import os, isaaclab_arena; print(os.path.abspath(isaaclab_arena.__file__))' 2>&1 || true)"
+echo "[13_todo] isaaclab_arena import path: $ARENA_IMPORT_PATH"
+if [[ "$ARENA_IMPORT_PATH" != "$PACK_ROOT/repos/IsaacLab-Arena/"* ]]; then
+  echo "[13_todo] ERROR: isaaclab_arena is not imported from $PACK_ROOT/repos/IsaacLab-Arena"
+  echo "[13_todo] Fix: sync submodule and keep local submodule first in PYTHONPATH before running."
+  exit 2
+fi
 
 # Build args for run_walk_to_grasp_todo.py
 cmd=(

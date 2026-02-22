@@ -257,12 +257,53 @@ def _line_intersects_aabb_2d(
     return True
 
 
+# ---------------------------------------------------------------------------
+# Dynamic collision registry (for LW-BenchHub / external scenes)
+# ---------------------------------------------------------------------------
+_DYNAMIC_OBSTACLES_2D: dict[str, list[tuple[tuple[float, float], tuple[float, float]]]] = {}
+_DYNAMIC_COLLISION_CUBOIDS: dict[str, list[dict]] = {}
+
+
+def register_scene_collision(
+    scene: str,
+    obstacles_2d: list[tuple[tuple[float, float], tuple[float, float]]] | None = None,
+    collision_cuboids: list[dict] | None = None,
+) -> None:
+    """Register dynamic collision data for a scene (e.g. from LW-BenchHub adapter)."""
+    if obstacles_2d is not None:
+        _DYNAMIC_OBSTACLES_2D[scene] = obstacles_2d
+    if collision_cuboids is not None:
+        _DYNAMIC_COLLISION_CUBOIDS[scene] = collision_cuboids
+
+
+def register_scene_collision_from_json(json_path: str) -> str:
+    """Load collision data from lwbench_scene_adapter.py output JSON.
+
+    Returns the scene name.
+    """
+    import json as _json
+    with open(json_path, "r", encoding="utf-8") as f:
+        data = _json.load(f)
+    scene_name = data["scene_info"]["scene_name"]
+    collision = data.get("collision", {})
+    obs_2d_raw = collision.get("obstacles_2d", [])
+    obstacles_2d = [
+        (tuple(obs[0]), tuple(obs[1])) for obs in obs_2d_raw
+    ]
+    cuboids = collision.get("collision_cuboids", [])
+    register_scene_collision(scene_name, obstacles_2d=obstacles_2d, collision_cuboids=cuboids)
+    return scene_name
+
+
 def _scene_obstacles(scene: str) -> list[tuple[tuple[float, float], tuple[float, float]]]:
     # coarse 2D obstacles for walk routing
     if scene == "kitchen_pick_and_place":
         return [((0.10, -0.62), (0.85, 0.62))]
     if scene == "galileo_g1_locomanip_pick_and_place":
         return [((0.20, -0.05), (1.10, 0.90))]
+    # Check dynamic registry
+    if scene in _DYNAMIC_OBSTACLES_2D:
+        return _DYNAMIC_OBSTACLES_2D[scene]
     return []
 
 
@@ -422,6 +463,9 @@ def _scene_collision_cuboids(scene: str) -> list[dict]:
             {"name": "table", "pose": [0.65, 0.425, 0.4, 1, 0, 0, 0],
              "dims": [0.90, 0.95, 0.8]},
         ]
+    # Check dynamic registry
+    if scene in _DYNAMIC_COLLISION_CUBOIDS:
+        return _DYNAMIC_COLLISION_CUBOIDS[scene]
     return []
 
 
@@ -674,9 +718,6 @@ def _plan_open_loop_path(
     target_xy: tuple[float, float],
 ) -> list[tuple[float, float]]:
     start_xy = (float(start_base_pos_w[0]), float(start_base_pos_w[1]))
-    if req.scene not in {"kitchen_pick_and_place", "galileo_g1_locomanip_pick_and_place"}:
-        return [start_xy, target_xy]
-
     obstacles = _scene_obstacles(req.scene)
     if not obstacles:
         return [start_xy, target_xy]

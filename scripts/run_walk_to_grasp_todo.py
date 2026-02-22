@@ -56,12 +56,15 @@ def _run_cmd(cmd: list[str], cwd: str | None = None, env: dict[str, str] | None 
 
 def _scene_defaults(scene: str) -> tuple[str, str, str]:
     # scene_preset, base_start_pos_w, target_offset_obj_w
+    # Known presets accepted by generate_debug_object_traj.py
+    _KNOWN_PRESETS = {"kitchen_pick_and_place", "galileo_locomanip", "none"}
     try:
         from bridge.scene_config import get_scene
         sc = get_scene(scene)
         bp = f"{sc.default_base_pos_w[0]},{sc.default_base_pos_w[1]},{sc.default_base_pos_w[2]}"
         wo = f"{sc.default_walk_target_offset[0]},{sc.default_walk_target_offset[1]},{sc.default_walk_target_offset[2]}"
-        return sc.arena_scene_name, bp, wo
+        preset = sc.arena_scene_name if sc.arena_scene_name in _KNOWN_PRESETS else "none"
+        return preset, bp, wo
     except ImportError:
         pass
     if scene == "kitchen_pick_and_place":
@@ -175,8 +178,23 @@ def main() -> None:
     out_dir = os.path.abspath(args.out_dir)
     os.makedirs(out_dir, exist_ok=True)
 
+    # Auto-register LW-BenchHub scene collision if LWBENCH_SCENE_JSON is set
+    lwbench_json = os.environ.get("LWBENCH_SCENE_JSON")
+    if lwbench_json and os.path.isfile(lwbench_json):
+        try:
+            from bridge.scene_config import register_scene_from_json
+            from isaac_replay.g1_curobo_planner import register_scene_collision_from_json
+            register_scene_from_json(lwbench_json)
+            register_scene_collision_from_json(lwbench_json)
+            print(f"[todo_pipeline] Registered LW-BenchHub scene from {lwbench_json}")
+        except Exception as exc:
+            print(f"[todo_pipeline] Warning: failed to register LW-BenchHub scene: {exc}")
+
     isaac_root = os.path.join(pack_root, "repos", "IsaacLab-Arena")
     python_exec = args.isaac_python or sys.executable
+    child_env = os.environ.copy()
+    current_pythonpath = child_env.get("PYTHONPATH", "")
+    child_env["PYTHONPATH"] = f"{isaac_root}:{current_pythonpath}" if current_pythonpath else isaac_root
 
     scene_preset, default_base_pos, default_target_offset = _scene_defaults(args.scene)
     base_pos_w = args.base_pos_w or default_base_pos
@@ -263,7 +281,7 @@ def main() -> None:
                 cmd.extend(["--end-pos-w", args.traj_end_pos_w])
             if args.traj_lift_height is not None:
                 cmd.extend(["--lift-height", f"{args.traj_lift_height}"])
-        code, out = _run_cmd(cmd)
+        code, out = _run_cmd(cmd, env=child_env)
         if code != 0:
             raise RuntimeError(out)
         return {"command": cmd, "stdout_tail": out[-1500:]}
@@ -441,7 +459,7 @@ def main() -> None:
                 ]
             )
 
-        code, out = _run_cmd(cmd)
+        code, out = _run_cmd(cmd, env=child_env)
         if code != 0:
             raise RuntimeError(out)
         return {"command": cmd, "stdout_tail": out[-1500:]}
@@ -503,7 +521,7 @@ def main() -> None:
                 cmd.extend([f"--g1-init-pos-w={start_base_pos_w_csv}", "--g1-init-yaw-deg", str(start_base_yaw_deg)])
             if args.headless:
                 cmd.insert(2, "--headless")
-            code, out = _run_cmd(cmd, cwd=isaac_root, env=os.environ.copy())
+            code, out = _run_cmd(cmd, cwd=isaac_root, env=child_env)
             if code != 0:
                 raise RuntimeError(out[-4000:])
             return {"command": cmd, "stdout_tail": out[-1500:], "max_steps": max_steps}

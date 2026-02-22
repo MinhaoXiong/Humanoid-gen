@@ -134,3 +134,41 @@ def scene_defaults_for_retarget(name: str) -> dict:
                  list(sc.clip_xy_max) if sc.clip_xy_max else None),
         base_height=sc.base_height,
     )
+
+
+# ---------------------------------------------------------------------------
+# Dynamic scene registration (for LW-BenchHub / external scenes)
+# ---------------------------------------------------------------------------
+def register_scene(name: str, config: SceneConfig) -> None:
+    """Register a new scene config at runtime. Does not overwrite existing."""
+    if name not in SCENES:
+        SCENES[name] = config
+
+
+def register_scene_from_json(json_path: str) -> str:
+    """Register a scene from a lwbench_scene_adapter.py output JSON.
+
+    Returns the scene name.
+    """
+    import json as _json
+    with open(json_path, "r", encoding="utf-8") as f:
+        data = _json.load(f)
+    sc_dict = data["scene_config"]
+    name = sc_dict["arena_scene_name"]
+    config = SceneConfig(
+        arena_scene_name=sc_dict["arena_scene_name"],
+        arena_background=sc_dict["arena_background"],
+        table_z=float(sc_dict["table_z"]),
+        object_align_pos=tuple(sc_dict["object_align_pos"]),
+        clip_z=tuple(sc_dict.get("clip_z", (0.05, 0.40))),
+        clip_xy_min=tuple(sc_dict["clip_xy_min"]) if sc_dict.get("clip_xy_min") else None,
+        clip_xy_max=tuple(sc_dict["clip_xy_max"]) if sc_dict.get("clip_xy_max") else None,
+        base_height=float(sc_dict.get("base_height", 0.75)),
+        default_base_pos_w=tuple(sc_dict["default_base_pos_w"]),
+        default_base_yaw_deg=float(sc_dict.get("default_base_yaw_deg", 0.0)),
+        default_walk_target_offset=tuple(sc_dict["default_walk_target_offset"]),
+        right_wrist_pos_obj=tuple(sc_dict.get("right_wrist_pos_obj", (-0.18, -0.04, 0.08))),
+        replay_base_height=float(sc_dict["replay_base_height"]) if sc_dict.get("replay_base_height") else None,
+    )
+    register_scene(name, config)
+    return name
