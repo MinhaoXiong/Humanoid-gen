@@ -90,6 +90,11 @@ def _add_object_replay_args(parser):
         help="Abort immediately if any env terminates/truncates during replay.",
     )
     parser.add_argument(
+        "--ignore-task-terminations",
+        action="store_true",
+        help="Disable non-timeout termination terms (e.g. success/object_dropped) during replay.",
+    )
+    parser.add_argument(
         "--use-hoi-object",
         action="store_true",
         help="Use HOIFHLI object mesh corresponding to trajectory object_name instead of pre-registered assets.",
@@ -441,6 +446,30 @@ class ObjectKinematicReplayer:
         asset.write_root_velocity_to_sim(self.zero_vel, env_ids=env_ids)
 
 
+def _disable_non_timeout_terminations(env) -> list[str]:
+    disabled_terms: list[str] = []
+    if not hasattr(env, "termination_manager"):
+        return disabled_terms
+
+    tm = env.termination_manager
+    for term_name in list(getattr(tm, "active_terms", [])):
+        term_cfg = tm.get_term_cfg(term_name)
+        if term_cfg.time_out or term_name in {"time_out", "timeout"}:
+            continue
+
+        def _always_false_termination(local_env, **kwargs):  # noqa: ANN001
+            return torch.zeros(local_env.num_envs, device=local_env.device, dtype=torch.bool)
+
+        term_cfg.func = _always_false_termination
+        term_cfg.params = {}
+        tm.set_term_cfg(term_name, term_cfg)
+        disabled_terms.append(term_name)
+
+    if disabled_terms:
+        print(f"[termination] Disabled non-timeout terms for replay: {disabled_terms}")
+    return disabled_terms
+
+
 def main():
     args_parser = get_isaaclab_arena_cli_parser()
     args_cli, _ = args_parser.parse_known_args()
@@ -485,6 +514,8 @@ def main():
             random.seed(args_cli.seed)
 
         obs, _ = env.reset()
+        if args_cli.ignore_task_terminations:
+            _disable_non_timeout_terminations(env)
         if object_only:
             policy = None
             policy_steps = 0

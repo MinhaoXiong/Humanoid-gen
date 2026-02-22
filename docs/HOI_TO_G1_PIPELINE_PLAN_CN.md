@@ -145,15 +145,34 @@ Module A 本身是已有的外部模型（hoifhli_release / HOIDiNi），不需�
 - 直接使用 `kitchen_pick_and_place`、`galileo_g1_locomanip_pick_and_place` 等已有场景
 - 通过参数调整物体位置、机器人初始位姿
 
-### 状态: ⬜ 未实现（使用路线 3 复用现有场景作为临时方案）
+### 状态: ✅ 路线 3 已实现（复用现有场景 + 集中配置）
 
-当前通过 `SCENE_DEFAULTS` 配置复用 IsaacLab-Arena 场景，未集成 TabletopGen/SceneWeaver。
+**实现文件：**
+- `bridge/scene_config.py` — 集中式场景配置注册表
+  - `SceneConfig` dataclass：场景参数（桌面高度、工作空间边界、机器人默认位姿）
+  - `ObjectConfig` dataclass：物体名称映射（HOI 名 → IsaacLab-Arena 资产名）
+  - `SCENES` dict：已注册场景（kitchen、galileo、packing_table）
+  - `OBJECT_MAP` dict：物体别名映射（YCB 物体 + HOI 数据集别名）
+  - `get_scene()` / `get_object()`：查询接口，带 fallback
 
-### 待做
+**已注册场景：**
+
+| 场景 | IsaacLab-Arena 背景 | 桌面 Z | 物体对齐位置 |
+|------|---------------------|--------|-------------|
+| kitchen_pick_and_place | kitchen | 0.10 | (0.40, 0.00, 0.10) |
+| galileo_g1_locomanip_pick_and_place | galileo_locomanip | 0.07 | (0.5785, 0.18, 0.07) |
+| packing_table | packing_table | 0.08 | (0.40, 0.00, 0.08) |
+
+**已注册物体映射：** cracker_box, mustard_bottle, sugar_box, tomato_soup_can, power_drill + 别名（smallbox→cracker_box, bottle→mustard_bottle 等）
+
+**集成点：**
+- `hoi_to_g1_retarget.py` 通过 `scene_defaults_for_retarget()` 读取配置
+- `run_walk_to_grasp_todo.py` 通过 `get_scene()` 读取配置（带 fallback）
+
+### 待做（路线 1/2 扩展）
 
 - [ ] TabletopGen USD 导出 → IsaacLab-Arena 场景注册
 - [ ] SceneWeaver USDC 导出 → IsaacLab-Arena 场景注册
-- [ ] 场景-物体匹配逻辑（根据 HOI 物体自动选择/生成场景）
 
 ---
 
@@ -188,9 +207,9 @@ Module A 本身是已有的外部模型（hoifhli_release / HOIDiNi），不需�
 |------|------|------|------|
 | Module A | Text-to-HOI 生成 | ⬜ 未实现 | 外部模型，需封装一键脚本 |
 | Module B | HOI→G1 轨迹适配 | ✅ 已实现 | `bridge/hoi_to_g1_retarget.py`，已测试 |
-| Module C | 场景生成 | ⬜ 未实现 | 当前复用 IsaacLab-Arena 现有场景 |
+| Module C | 场景配置 | ✅ 已实现 | `bridge/scene_config.py`，复用 IsaacLab-Arena 场景 |
 | Module D | 机器人回放整合 | ✅ 已整合 | `run_walk_to_grasp_todo.py` + `14_hoi_to_g1_walk_grasp.sh` |
 
-**已完成核心链路：** HOI pkl → retarget → NPZ → arm-follow replay → Isaac Sim（B + D）
+**已完成核心链路：** HOI pkl → retarget → NPZ → arm-follow replay → Isaac Sim（B + C + D）
 
 **待完成：** HOI 生成封装（A）、场景生成集成（C）、Isaac Sim 端到端验证

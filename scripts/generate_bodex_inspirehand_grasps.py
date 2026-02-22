@@ -12,6 +12,13 @@ from datetime import datetime
 
 import torch
 import numpy as np
+from scipy.spatial.transform import Rotation
+
+# Spider IK finger indices -> BODex 6 independent DOF
+# Spider order: [thumb_yaw, thumb_pitch, thumb_inter, thumb_distal,
+#                index_prox, index_inter, middle_prox, middle_inter,
+#                ring_prox, ring_inter, pinky_prox, pinky_inter]
+SPIDER_TO_BODEX_6 = [0, 1, 4, 6, 8, 10]
 
 # Mimic joint mapping: independent_joint -> [(mimic_joint, multiplier, offset), ...]
 INSPIRE_MIMIC_MAP = {
@@ -64,6 +71,62 @@ def expand_mimic_joints(independent_q: torch.Tensor) -> torch.Tensor:
     return full_q
 
 
+def load_spider_seed(npz_path: str, frame: int = -1) -> torch.Tensor:
+    """Load spider IK output and convert to BODex seed_config [1, 1, 13].
+
+    BODex seed format: [x, y, z, qw, qx, qy, qz, 6_independent_dof]
+    Spider qpos format: [wrist_xyz(3), wrist_euler_xyz(3), finger_12dof, object_7dof]
+    """
+    data = np.load(npz_path)
+    qpos = data["qpos"][frame]  # (25,)
+    wrist_pos = qpos[:3]
+    wrist_euler = qpos[3:6]
+    finger_12 = qpos[6:18]
+
+    # Euler XYZ -> quaternion (wxyz for BODex)
+    quat_xyzw = Rotation.from_euler("xyz", wrist_euler).as_quat()
+    quat_wxyz = [quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]]
+
+    # Extract 6 independent DOF from 12 spider joints
+    independent_6 = finger_12[SPIDER_TO_BODEX_6]
+
+    seed = np.concatenate([wrist_pos, quat_wxyz, independent_6])
+    return torch.tensor(seed, dtype=torch.float32).unsqueeze(0).unsqueeze(0)  # [1,1,13]
+
+
+def rank_by_human_distance(
+    solutions: torch.Tensor,
+    human_wrist_pose_7d: torch.Tensor,
+    human_finger_6: torch.Tensor,
+    lambda_rot: float = 1.0,
+    lambda_finger: float = 0.5,
+) -> torch.Tensor:
+    """Rank BODex results by distance to human hand pose.
+
+    d = ||t_robot - t_human||_2 + lambda_rot * arccos(|q_robot . q_human|) + lambda_finger * ||q_finger_diff||
+
+    Args:
+        solutions: [K, 13] (7 root pose + 6 finger DOF)
+        human_wrist_pose_7d: [7] (x,y,z,qw,qx,qy,qz)
+        human_finger_6: [6] independent finger DOF
+        lambda_rot: weight for rotation distance
+        lambda_finger: weight for finger distance
+
+    Returns:
+        distances: [K] lower is closer to human
+    """
+    pos_dist = torch.norm(solutions[:, :3] - human_wrist_pose_7d[:3], dim=-1)
+
+    q_robot = solutions[:, 3:7]
+    q_human = human_wrist_pose_7d[3:7]
+    dot = torch.abs((q_robot * q_human).sum(dim=-1)).clamp(max=1.0)
+    rot_dist = torch.acos(dot)
+
+    finger_dist = torch.norm(solutions[:, 7:] - human_finger_6, dim=-1)
+
+    return pos_dist + lambda_rot * rot_dist + lambda_finger * finger_dist
+
+
 def _ensure_bodex_importable():
     bodex_src = os.environ.get(
         "BODEX_CUROBO_SRC",
@@ -89,6 +152,14 @@ def _make_parser() -> argparse.ArgumentParser:
     p.add_argument("--parallel-world", type=int, default=1)
     p.add_argument("--output-pt", default=None)
     p.add_argument("--top-k", type=int, default=16)
+    p.add_argument("--seed-from-spider", default=None,
+                   help="Spider IK output .npz to use as seed_config")
+    p.add_argument("--seed-frame", type=int, default=-1,
+                   help="Frame index from spider trajectory to use as seed")
+    p.add_argument("--rank-by-human", action="store_true",
+                   help="Rank results by distance to human hand pose (from spider)")
+    p.add_argument("--lambda-rot", type=float, default=1.0)
+    p.add_argument("--lambda-finger", type=float, default=0.5)
     return p
 
 
@@ -131,23 +202,41 @@ def main() -> None:
     grasp_solver = GraspSolver(grasp_config)
     print(f"[bodex_grasp] Solver ready ({time.time() - t0:.1f}s). Solving ...")
 
-    result = grasp_solver.solve_batch_env(return_seeds=grasp_solver.num_seeds)
+    # Module B: load spider seed if provided
+    seed_config = None
+    human_seed_13 = None
+    if args.seed_from_spider:
+        spider_seed = load_spider_seed(args.seed_from_spider, args.seed_frame)
+        seed_config = spider_seed.cuda()
+        human_seed_13 = spider_seed.squeeze()  # [13] for ranking
+        print(f"[bodex_grasp] Using spider seed from {args.seed_from_spider} frame={args.seed_frame}")
 
-    # Extract solutions: shape [n_env, n_seeds, horizon, dof]
-    # solution[:, :, -1, :] is the final pose: first 7 = root pose, rest = joint angles
-    sol = result.solution  # [n_env, n_seeds, horizon, 7+6]
-    final_sol = sol[:, :, -1, :]  # [n_env, n_seeds, 13]
-    grasp_err = result.grasp_error  # [n_env, n_seeds]
+    result = grasp_solver.solve_batch_env(
+        return_seeds=grasp_solver.num_seeds,
+        seed_config=seed_config,
+    )
+
+    sol = result.solution
+    final_sol = sol[:, :, -1, :]
+    grasp_err = result.grasp_error
     dist_err = result.dist_error
 
-    # Flatten envs
     final_sol = final_sol.reshape(-1, final_sol.shape[-1])
     grasp_err = grasp_err.reshape(-1)
     dist_err = dist_err.reshape(-1)
 
-    # Sort by grasp error, take top-k
+    # Module C: rank by human distance or grasp error
     top_k = min(args.top_k, final_sol.shape[0])
-    sorted_idx = torch.argsort(grasp_err)[:top_k]
+    if args.rank_by_human and human_seed_13 is not None:
+        human_dist = rank_by_human_distance(
+            final_sol, human_seed_13[:7].to(final_sol.device),
+            human_seed_13[7:].to(final_sol.device),
+            args.lambda_rot, args.lambda_finger,
+        )
+        sorted_idx = torch.argsort(human_dist)[:top_k]
+        print(f"[bodex_grasp] Ranked by human distance (best={float(human_dist[sorted_idx[0]]):.4f})")
+    else:
+        sorted_idx = torch.argsort(grasp_err)[:top_k]
 
     wrist_pose_7d = final_sol[sorted_idx, :7]  # [K, 7]
     independent_q = final_sol[sorted_idx, 7:]   # [K, 6]
@@ -164,6 +253,9 @@ def main() -> None:
         "joint_names_12": ALL_JOINTS_ORDER,
         "independent_joint_names": INDEPENDENT_JOINTS,
     }
+    if args.rank_by_human and human_seed_13 is not None:
+        output_data["human_distance"] = human_dist[sorted_idx].cpu()
+        output_data["human_seed_13"] = human_seed_13.cpu()
 
     if args.output_pt:
         out_path = os.path.abspath(args.output_pt)

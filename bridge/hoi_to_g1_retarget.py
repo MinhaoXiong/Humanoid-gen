@@ -30,18 +30,10 @@ G1_XML = "/home/ubuntu/DATA2/workspace/xmh/spider/spider/assets/robots/unitree_g
 SMPLX_PELVIS = 0
 SMPLX_RIGHT_WRIST = 21
 
-SCENE_DEFAULTS = {
-    "kitchen_pick_and_place": dict(
-        table_z=0.10, align_pos=[0.40, 0.00, 0.10],
-        clip_z=(0.05, 0.40), clip_xy=([0.05, -0.45], [0.65, 0.45]),
-        base_height=0.75,
-    ),
-    "galileo_g1_locomanip_pick_and_place": dict(
-        table_z=0.07, align_pos=[0.5785, 0.18, 0.07],
-        clip_z=(0.06, 0.40), clip_xy=(None, None),
-        base_height=0.78,
-    ),
-}
+import sys as _sys
+if PACK_ROOT not in _sys.path:
+    _sys.path.insert(0, PACK_ROOT)
+from bridge.scene_config import scene_defaults_for_retarget as _get_scene_defaults
 
 TARGET_FPS = 50.0
 HOI_FPS = 30.0
@@ -231,7 +223,7 @@ def reconstruct_obj_traj_simple(h_wrist, h_obj_pos, h_obj_rot, g1_palm, g1_rot):
 # ---------------------------------------------------------------------------
 def align_and_clip(obj_pos, obj_rot, scene):
     """Align first frame to scene table, clip to workspace bounds."""
-    sd = SCENE_DEFAULTS.get(scene, {})
+    sd = _get_scene_defaults(scene)
     align = np.array(sd.get("align_pos", [0.4, 0.0, 0.1]))
 
     # Translate so first frame lands at align position
@@ -281,7 +273,7 @@ def save_npz(path, obj_pos, obj_rot, object_name, fps=TARGET_FPS):
 # ---------------------------------------------------------------------------
 def adapt_obj_only(obj_pos, obj_rot, scene):
     """When no human body data, use heuristic scaling to G1 workspace."""
-    sd = SCENE_DEFAULTS.get(scene, {})
+    sd = _get_scene_defaults(scene)
     align = np.array(sd.get("align_pos", [0.4, 0.0, 0.1]))
     # Center trajectory around align position
     center = obj_pos.mean(axis=0)
@@ -316,7 +308,7 @@ def main():
     print(f"[retarget] Object: {obj_name}  frames: {hoi['obj_pos'].shape[0]}"
           f"  has_body: {hoi['jnts'] is not None}")
 
-    sd = SCENE_DEFAULTS.get(args.scene, {})
+    sd = _get_scene_defaults(args.scene)
     base_h = sd.get("base_height", 0.75)
 
     if hoi["jnts"] is not None and not args.no_retarget:

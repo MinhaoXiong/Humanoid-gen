@@ -56,6 +56,14 @@ def _run_cmd(cmd: list[str], cwd: str | None = None, env: dict[str, str] | None 
 
 def _scene_defaults(scene: str) -> tuple[str, str, str]:
     # scene_preset, base_start_pos_w, target_offset_obj_w
+    try:
+        from bridge.scene_config import get_scene
+        sc = get_scene(scene)
+        bp = f"{sc.default_base_pos_w[0]},{sc.default_base_pos_w[1]},{sc.default_base_pos_w[2]}"
+        wo = f"{sc.default_walk_target_offset[0]},{sc.default_walk_target_offset[1]},{sc.default_walk_target_offset[2]}"
+        return sc.arena_scene_name, bp, wo
+    except ImportError:
+        pass
     if scene == "kitchen_pick_and_place":
         return "kitchen_pick_and_place", "-0.55,0.0,0.0", "-0.35,0.0,0.0"
     if scene == "galileo_g1_locomanip_pick_and_place":
@@ -484,6 +492,7 @@ def main() -> None:
                 "--max-steps",
                 str(max_steps),
                 "--abort-on-reset",
+                "--ignore-task-terminations",
                 args.scene,
                 "--object",
                 args.object,

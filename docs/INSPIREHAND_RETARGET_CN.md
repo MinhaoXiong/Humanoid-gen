@@ -189,35 +189,53 @@ urdf_12dof = finger_q[:, SPIDER_TO_URDF]
 
 ## 4. BODex 抓取生成
 
-### 4.1 运行抓取生成
+### 4.1 基础抓取生成
 
 ```bash
 cd Humanoid-gen-pack
-conda activate bodex  # 或包含 curobo 的环境
+conda activate bodex
 
 python scripts/generate_bodex_inspirehand_grasps.py \
-  --object_mesh path/to/object.obj \
-  --output grasps.pt
+  --mesh-file path/to/object.obj \
+  --output-pt grasps.pt
 ```
 
-### 4.2 使用 Spider 重定向结果作为 BODex seed
+### 4.2 模块 B：Spider Seed 注入
 
-```python
-import torch
+使用 spider IK 输出作为 BODex 优化的初始种子，提升抓取质量：
 
-# 从 spider 输出提取抓取帧的手部状态
-grasp_frame = -1  # 最后一帧（抓取时刻）
-wrist_pos = wrist_q[grasp_frame, :3]
-wrist_euler = wrist_q[grasp_frame, 3:6]
+```bash
+python scripts/generate_bodex_inspirehand_grasps.py \
+  --mesh-file path/to/object.obj \
+  --seed-from-spider path/to/trajectory_ikrollout.npz \
+  --seed-frame -1
+```
 
-# 转四元数
-from scipy.spatial.transform import Rotation
-quat_xyzw = Rotation.from_euler("xyz", wrist_euler).as_quat()
-quat_wxyz = [quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]]
+内部转换流程：
+- Spider qpos `[wrist_xyz(3), euler_xyz(3), finger_12dof, obj_7dof]`
+- → BODex seed `[xyz(3), quat_wxyz(4), 6_independent_dof]` = 13D
+- Spider 12 指关节 → BODex 6 独立 DOF 索引: `[0, 1, 4, 6, 8, 10]`
 
-# BODex seed_config: [pos(3) + quat_wxyz(4) + 6_independent_dof]
-seed = torch.tensor([*wrist_pos, *quat_wxyz, *bodex_6dof[grasp_frame]])
-# 传给 GraspSolver.solve_batch_env(..., seed_config=seed.unsqueeze(0))
+### 4.3 模块 C：人手距离排序
+
+同时使用 seed 注入和人手距离排序，选择最接近人类抓取的结果：
+
+```bash
+python scripts/generate_bodex_inspirehand_grasps.py \
+  --mesh-file path/to/object.obj \
+  --seed-from-spider path/to/trajectory_ikrollout.npz \
+  --rank-by-human \
+  --lambda-rot 1.0 --lambda-finger 0.5
+```
+
+距离度量（论文 Eq.5）：
+```
+d = ||t_robot - t_human||₂ + λ_rot · arccos(|q_robot · q_human|) + λ_finger · ||q_finger_diff||₂
+```
+
+Shell 快捷方式（自动启用 seed + ranking）：
+```bash
+bash scripts/generate_bodex_inspirehand_grasps.sh object.obj spider_ik.npz output.pt
 ```
 
 ---
