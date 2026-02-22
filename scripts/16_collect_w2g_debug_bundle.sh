@@ -15,6 +15,11 @@ export RUNNER_DEBUG_MAX_STEPS="${RUNNER_DEBUG_MAX_STEPS:-2000}"
 mkdir -p "$OUT_DIR" "$RUNNER_DEBUG_DIR"
 
 SNAPSHOT="$OUT_DIR/env_snapshot.txt"
+if command -v rg >/dev/null 2>&1; then
+  SEARCH_CMD="rg -n"
+else
+  SEARCH_CMD="grep -nE"
+fi
 {
   echo "date=$(date -Iseconds)"
   echo "pack_root=$PACK_ROOT"
@@ -28,8 +33,8 @@ SNAPSHOT="$OUT_DIR/env_snapshot.txt"
   git -C "$PACK_ROOT/repos/IsaacLab-Arena" rev-parse --short HEAD
   echo ""
   echo "[mapping checks]"
-  rg -n "actions\\[:, -7:\\]" "$PACK_ROOT/repos/IsaacLab-Arena/isaaclab_arena/embodiments/g1/g1.py" || true
-  rg -n "_LEGACY_HAND_TO_INSPIRE_HAND|_INSPIRE_HAND_TO_LEGACY_HAND" \
+  $SEARCH_CMD "actions\\[:, -7:\\]" "$PACK_ROOT/repos/IsaacLab-Arena/isaaclab_arena/embodiments/g1/g1.py" || true
+  $SEARCH_CMD "_LEGACY_HAND_TO_INSPIRE_HAND|_INSPIRE_HAND_TO_LEGACY_HAND" \
     "$PACK_ROOT/repos/IsaacLab-Arena/isaaclab_arena_g1/g1_whole_body_controller/wbc_policy/run_policy.py" || true
 } >"$SNAPSHOT" 2>&1 || true
 

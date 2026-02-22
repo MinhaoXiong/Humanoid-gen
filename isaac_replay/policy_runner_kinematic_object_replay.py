@@ -561,6 +561,15 @@ class _RuntimeDebugLogger:
         except Exception as exc:  # pragma: no cover - best-effort debug
             meta["env"]["robot_joint_names_error"] = f"{type(exc).__name__}: {exc}"
         try:
+            robot_asset = env.scene["robot"]
+            spawn = getattr(getattr(robot_asset, "cfg", None), "spawn", None)
+            meta["env"]["robot_spawn_usd_path"] = str(getattr(spawn, "usd_path", ""))
+            for attr in ("is_fixed_base", "fixed_base"):
+                if hasattr(robot_asset, attr):
+                    meta["env"][f"robot_{attr}"] = _to_serializable(getattr(robot_asset, attr))
+        except Exception as exc:  # pragma: no cover - best-effort debug
+            meta["env"]["robot_spawn_info_error"] = f"{type(exc).__name__}: {exc}"
+        try:
             g1_term = env.action_manager.get_term("g1_action")
             meta["action_term"]["type"] = type(g1_term).__name__
             if hasattr(g1_term, "action_dim"):
